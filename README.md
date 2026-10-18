@@ -1,0 +1,144 @@
+# 🤖 ربات OCR فارسی — Production Pipeline (مستر 2000 DPI)
+
+پایپ‌لاین OCR تولیدی فارسی با **رندر مستر 2000 DPI**، معماری ناحیه‌محورِ حافظه‌امن،
+جدول‌خوانی سلول‌به‌سلول، fallback چندموتوره (Google Vision → Tesseract) و
+گذرهای تخصصی ارقام (فارسی/انگلیسی/مخلوط RTL-LTR).
+
+## 🏗️ معماری
+
+```
+PDF ──▶ render.py      رندر مستر 2000DPI (TIFF lossless + metadata کامل: requested/
+                       effective DPI، ابعاد PDF، حافظه، زمان رندر — بخش ۱ و ۲)
+    ──▶ preprocess.py  پیش‌پردازش تحلیل‌محور: تحلیل روی تصویر کوچک، اعمال فقط عملیاتِ
+                       لازم روی مستر (illumination/contrast/deskew/denoise با حفظ
+                       نقطه‌های فارسی) + محافظ صفحهٔ تمیز (بدون فیلتر سنگین روی
+                       سند دیجیتال) + optimal_ocr_scale کالیبره‌شده (بخش ۳)
+    ──▶ layout.py      تحلیل چیدمان در مقیاس کوچک + نگاشت به مستر: جدول/متن/گرافیک (بخش ۹ و ۱۳)
+    ──▶ tables.py      شبکهٔ جدول، برش سلول از مستر، strip_grid_lines، مدل منطقی جدول
+                       (row/col/span/bbox/raw/normalized/conf/engine/digit_type/needs_review)
+                       + خروجی JSON/CSV/HTML/XLSX/Markdown (بخش ۹ تا ۱۱)
+    ──▶ engines.py     GoogleVisionEngine + TesseractEngine (docker ocr-tesseract:fa)
+                       + ocr_any با fallback چندموتوره + بازیابی PSM + گذر ترمیم eng
+                       برای جزیره‌های لاتین + بازسازی BiDi سطرها (بخش ۴ تا ۷ و ۱۴ و ۱۵)
+    ──▶ pipeline.py    ارکستراتور: OCR ناحیه‌ای با رأی‌گیری چندمقیاسی، جدول سلول‌به‌سلول،
+                       گذر گلیف عددی (قوانین شکل: صفر/۳-۴)، اعتبارسنجی، متریکس، دیباگ
+                       (بخش ۱۰ و ۱۲ و ۲۰ و ۲۴ تا ۲۸)
+    ──▶ metrics.py     زمان هر مرحله + اوج RAM + شمارنده‌ها (بخش ۲۵)
+```
+
+**قانون طلایی:** هر تغییری (مقیاس/برش/فیلتر) از تصویر مستر 2000DPI منشأ می‌گیرد؛
+مختصات همهٔ چیزها به دستگاه مختصات مستر برمی‌گردد (بخش ۱۲).
+
+## ⚙️ نصب
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# ایمیج Tesseract با زبان فارسی
+docker build -f docker/tesseract.Dockerfile -t ocr-tesseract:fa .
+# مدل‌های fas و eng همراه پروژه در tessdata/ قرار دارند
+```
+
+## 🔑 Google Vision (اختیاری)
+
+کلید `AIza...` را در `api_key.txt` بگذارید یا `GOOGLE_API_KEY` را ست کنید.
+در شبکه‌های بسته (HTTP 403) موتور خودکار غیرفعال و **fallback به Tesseract** انجام می‌شود.
+
+## 🚀 اجرا
+
+### CLI
+
+```bash
+.venv/bin/python ocr_bot.py file.pdf                 # خروجی در output/file/
+.venv/bin/python ocr_bot.py input/ --out output      # پوشهٔ کامل
+.venv/bin/python ocr_bot.py input/ --tesseract-only  # فقط Tesseract (بدون گوگل)
+.venv/bin/python ocr_bot.py input/ --langs fas+eng   # زبان‌های Tesseract
+.venv/bin/python ocr_bot.py input/ --benchmark input/ground_truth.json
+```
+
+### وب‌اپ (2000DPI + پیشرفت زنده)
+
+```bash
+nohup .venv/bin/python web_app.py > /tmp/webapp.log 2>&1 &
+# → http://127.0.0.1:5001
+```
+
+آپلود گروهی PDF، پیشرفت صفحه‌به‌صفحه، خروجی TXT/JSON/جدول‌ها/دیباگ + ZIP.
+
+### بنچمارک (۴ سند واقعی)
+
+```bash
+.venv/bin/python make_bench_docs.py   # ساخت اسناد + ground truth
+.venv/bin/python run_benchmark.py --local
+```
+
+## 📦 خروجی هر سند
+
+```
+output/<stem>/
+  <stem>.txt              TXT خوانا با جداکنندهٔ صفحه + جدول Markdown (بخش ۲۳)
+  <stem>.json             ساختار کامل: pages/width/dpi/blocks/lines/words(bbox+conf)/
+                          raw_text/normalized_text/normalized_en_digits/tables/
+                          confidence/identifiers/validation/metrics (بخش ۲۲)
+  master/master_pNNNN.tiff  مستر 2000DPI (TIFF lossless)
+  tables/table_00N.{json,csv,html,xlsx}   مدل منطقی + خروجی‌های جدول (بخش ۱۱)
+  debug/page_NNN_layout.png               کادر ناحیه‌ها/سلول‌ها/کم‌اطمینان (بخش ۲۴)
+```
+
+## 🎯 قواعد دقت کلیدی (کالیبره‌شدهٔ تجربی)
+
+- **مقیاس بهینهٔ OCR**: ارتفاع گلیف ~35–40px؛ سلول‌های بزرگ مستر در 0.05–0.22.
+- **رأی‌گیری چندمقیاسی**: متن درست بین مقیاس‌ها تکرار می‌شود؛ اکثریتِ غیرخالی برنده.
+- **گذر گلیف عددی**: صفر فارسی = دایرهٔ کوچک هم‌تراز خط پایه (قانون شکل)؛ ۳/۴ با
+  شمارش ران‌های لبهٔ راست تفکیک می‌شوند؛ ارقام داخل عدد LTR می‌شینند.
+- **گذر ترمیم eng**: مدل fas ارقام/لاتین را «لالالا»/صفر خراب می‌خواند؛ توکن‌های
+  آشغالِ قطعی با هم‌پوشان گذر eng خالص تعویض می‌شوند — حروف فارسی سالم هرگز.
+- **BiDi**: جزیره‌های پیوستهٔ LTR (عدد+واحد، HS Code، Institute Cargo Clauses (A))
+  معکوس بازسازی می‌شوند؛ اتصال شناسه‌های خط‌تیره‌دار (INV-2026-004291).
+- **صفر اتلاف داده**: خوانش‌های حل‌نشده `needs_review: true` می‌گیرند (بخش ۲۷).
+
+## 📊 نتایج بنچمارک (Tesseract فقط-محلی، اسناد واقعی رندرشده از PDF)
+
+| سند | CER | WER | Numeric | Table Cell |
+|---|---|---|---|---|
+| bench_persian (فارسی معمولی) | 0.049 | 0.225 | 0.11 | — |
+| bench_table (جدول‌دار) | 0.000 | 0.000 | 1.00 | 0.70 |
+| bench_mixed (فارسی/انگلیسی) | 0.312 | 2.233 | **1.00** | — |
+| bench_lowq (اسکن کم‌کیفیت) | 0.316 | 1.825 | 0.22 | — |
+| **میانگین** | **0.169** | **1.071** | **0.583** | **0.70** |
+
+## 🧯 نکته‌ها
+
+- 2000DPI روی A4 ≈ 16540×23390px ≈ 1.1GB رستر؛ پایپ‌لاین یک نسخهٔ کامل در RAM نگه
+  می‌دارد و بقیه را برش/جریان می‌کند (بخش ۲).
+- مستر هرگز با JPEG بازنویسی نمی‌شود — فقط TIFF lossless.
+- `--max-pages 1` برای تست سریع.
+
+## اجرای نسخهٔ شرکتی
+
+رابط وب از فونت محلی وزیر بولد، متن‌های رسمی و کنترل‌های متنی استفاده می‌کند.
+موتور Tesseract بومی نیز پشتیبانی می‌شود؛ مسیر اجرایی آن با `TESSERACT_CMD`
+و پوشهٔ مدل‌ها با `OCR_TESSDATA_DIR` قابل تنظیم است. مسیر Docker همچنان پشتیبانی می‌شود.
+
+نسخهٔ عمومی با Waitress پشت IIS اجرا می‌شود. کلید نشست، کلید Google Vision و
+داده‌های کاربران در پوشهٔ خصوصی خارج از مخزن و ریشهٔ وب نگهداری می‌شوند.
+بارگذاری‌ها به PDF معتبر، حداکثر ۱۰۰ فایل و ۳۰۰ صفحه در هر نوبت محدود هستند.
+دریافت نتیجه به نشست همان مرورگر وابسته است. صف هم‌زمان محدود است و در صورت
+کمبود فضای دیسک، درخواست جدید پذیرفته نمی‌شود؛ اسناد موجود حذف نمی‌شوند.
+
+ترتیب انتشار الزامی:
+
+```powershell
+python -m unittest discover -s tests -v
+git add <changed-source-files>
+git commit -m "Describe the change"
+git push origin main
+.\deploy.ps1
+```
+
+اسکریپت انتشار فقط نسخهٔ تمیز و پوش‌شده به `origin/main` را منتشر می‌کند و
+نسخه‌های قبلی را حفظ می‌کند. گزینهٔ `-ProvisionDomain` برای آماده‌سازی اولیهٔ
+DNS و گواهی HTTPS زیر دامنهٔ `ocr.gomrok.org` است. هیچ کلید، فایل بارگذاری‌شده
+یا خروجی پردازش نباید به Git اضافه شود.
