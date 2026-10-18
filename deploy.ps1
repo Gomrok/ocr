@@ -28,6 +28,18 @@ foreach ($directory in @($release, $shared, $proxyRoot, $runtime, (Join-Path $sh
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 
+# The service and IIS can read code but cannot create or replace application files.
+$rootAcl = [Security.AccessControl.DirectorySecurity]::new()
+$rootAcl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl'),
+                    @('S-1-5-19', 'ReadAndExecute'), @('S-1-5-17', 'ReadAndExecute'),
+                    @('S-1-5-32-568', 'ReadAndExecute'))) {
+    $rootAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($rule[0]), $rule[1],
+        'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+}
+Set-Acl -LiteralPath $root -AclObject $rootAcl
+
 # Private configuration is outside both the checkout and the IIS document root.
 $acl = [Security.AccessControl.DirectorySecurity]::new()
 $acl.SetAccessRuleProtection($true, $false)
