@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
 import json
 import os
 import re
@@ -17,8 +19,11 @@ import shutil
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
@@ -98,6 +103,8 @@ class OCREngine:
 
 
 def _iou(a, b) -> float:
+    if a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]:
+        return 0.0
     ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
     iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
     inter = ix * iy
@@ -473,6 +480,13 @@ class TesseractEngine(OCREngine):
         self.langs = langs
         self._docker_ok: bool | None = None
         self._native_ok: bool | None = None
+        # Each engine belongs to one document. Never retain customer text in a
+        # global cache, and return copies because callers adjust word geometry.
+        self._cache: OrderedDict[tuple, tuple[dict, int]] = OrderedDict()
+        self._cache_bytes = 0
+        self._cache_lock = threading.Lock()
+        self._processes = 0
+        self._cache_hits = 0
         self.tessdata_dir = Path(os.environ.get("OCR_TESSDATA_DIR") or
                                  Path(__file__).resolve().parent.parent / "tessdata")
         candidates = [os.environ.get("TESSERACT_CMD", ""), "tesseract",
@@ -531,11 +545,18 @@ class TesseractEngine(OCREngine):
 
     def ocr_image(self, png: bytes, psm: int = 3,
                   whitelist: str | None = None, langs: str | None = None) -> dict:
+        langs_eff = langs or self.langs
+        key = (hashlib.sha256(png).digest(), psm, whitelist, langs_eff)
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                self._cache_hits += 1
+                return copy.deepcopy(cached[0])
         native = self.native_ok()
         if not native and not self.docker_ok():
             raise RuntimeError("هیچ موتور محلی OCR در دسترس نیست")
         # گذر دوم لاتین‌محور: زبان متفاوت (مثل fas+eng) فقط در نواحی لاتین‌محور (بخش ۷)
-        langs_eff = langs or self.langs
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
             tf.write(png)
             tmp_in = tf.name
@@ -568,6 +589,8 @@ class TesseractEngine(OCREngine):
                     cmd.append(str(config))
                 else:
                     cmd += ["-c", f"tessedit_char_whitelist={whitelist}"]
+            with self._cache_lock:
+                self._processes += 1
             p = subprocess.run(cmd, capture_output=True, timeout=900)
             if p.returncode != 0:
                 raise RuntimeError("tesseract: " + p.stderr.decode(errors="replace")[:300])
@@ -575,16 +598,32 @@ class TesseractEngine(OCREngine):
             words = self._parse_hocr(Path(base + ".hocr").read_text("utf-8")
                                      if Path(base + ".hocr").is_file() else "")
             confs = [w["confidence"] for w in words if w.get("confidence")]
-            return {
+            result = {
                 "text": text,
                 "words": words,
                 "confidence": (sum(confs) / len(confs)) if confs else None,
                 "engine": "tesseract",
                 "psm": psm,
             }
+            size = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+            if size <= 256 * 1024:
+                with self._cache_lock:
+                    previous = self._cache.pop(key, None)
+                    if previous:
+                        self._cache_bytes -= previous[1]
+                    self._cache[key] = (copy.deepcopy(result), size)
+                    self._cache_bytes += size
+                    while len(self._cache) > 128 or self._cache_bytes > 4 * 1024 * 1024:
+                        _, (_, removed_size) = self._cache.popitem(last=False)
+                        self._cache_bytes -= removed_size
+            return result
         finally:
             os.unlink(tmp_in)
             shutil.rmtree(outdir, ignore_errors=True)
+
+    def statistics(self) -> dict[str, int]:
+        with self._cache_lock:
+            return {"ocr_processes": self._processes, "ocr_cache_hits": self._cache_hits}
 
     @staticmethod
     def _parse_hocr(hocr_html: str) -> list[dict]:
@@ -689,3 +728,24 @@ def ocr_any(engines: list[OCREngine], png: bytes, region_kind: str = "text",
     if extra_passes:
         best["extra_passes"] = extra_passes
     return best
+
+
+def ocr_many(engines: list[OCREngine], images: list[bytes],
+             region_kind: str = "text", whitelist: str | None = None) -> list[dict | None]:
+    """Run independent candidates in input order without dropping any passes.
+
+    Only native, local OCR is parallelized. Docker and cloud retain their
+    sequential behavior. At most four subprocesses run, even on large servers.
+    """
+    def recognize(image: bytes) -> dict | None:
+        try:
+            return ocr_any(engines, image, region_kind=region_kind, whitelist=whitelist)
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+            return None
+
+    workers = min(4, max(1, (os.cpu_count() or 1) // 2), len(images))
+    if (workers < 2 or len(engines) != 1 or
+            not isinstance(engines[0], TesseractEngine) or not engines[0].native_ok()):
+        return [recognize(image) for image in images]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ocr-candidate") as pool:
+        return list(pool.map(recognize, images))

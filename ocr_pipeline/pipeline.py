@@ -50,13 +50,15 @@ def validate_text(raw: str) -> dict:
 def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
              debug_dir: Path | None = None, page_no: int = 1) -> dict:
     """OCR یک صفحه از مستر — معماری ناحیه‌محور، بدون نگه‌داشتن چند نسخهٔ کامل."""
-    img = master.read_full()          # مستر 2000DPI (حافظهٔ خط ۲)
+    with m.step("master_read"):
+        img = master.read_full()          # مستر 2000DPI (حافظهٔ خط ۲)
     if img is None:
         raise RuntimeError(f"master image unreadable: {master.path}")
     H, W = img.shape[:2]
     ws = WORK_SCALE
     raw_img = img  # مستر خام — برای گذرهای مخصوص (مثل گلیف عددی در صفحات تمیز)
-    proc_small = cv2.resize(img, None, fx=ws, fy=ws, interpolation=cv2.INTER_AREA)
+    with m.step("working_image"):
+        proc_small = cv2.resize(img, None, fx=ws, fy=ws, interpolation=cv2.INTER_AREA)
 
     # ── پیش‌پردازش: تحلیل روی کوچک، اعمال روی مستر (بخش ۳) ──
     with m.step("preprocess"):
@@ -128,18 +130,18 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                 ladder = [f0, 0.16, 0.13, 0.10]
             else:
                 ladder = [f0, round(f0 * 0.5, 3)]
-            results = []
+            candidates = []
             for fac in dict.fromkeys(round(x, 3) for x in ladder if x >= 0.04):
                 ok, buf = cv2.imencode(
                     ".png", P.pad_white(P.resize_by_factor(crop, fac)))
                 if not ok:
                     continue
-                m.inc("ocr_calls")
-                try:
-                    r = E.ocr_any(engine_list, buf.tobytes(), region_kind="text")
-                except Exception:
-                    continue
-                if r.get("words"):
+                candidates.append((fac, buf.tobytes()))
+            m.inc("ocr_calls", len(candidates))
+            results = []
+            readings = E.ocr_many(engine_list, [png for _, png in candidates], region_kind="text")
+            for (fac, _), r in zip(candidates, readings):
+                if r and r.get("words"):
                     r["_scale"] = fac
                     results.append(r)
             if not results:
@@ -226,7 +228,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
 
     # ── ساختار سطری متن صفحه از کلمات (بخش ۵ و ۲۱) ──
     words_all = E.merge_word_lists([words_all])
-    _verify_text_numbers(words_all, proc, engine_list, m)
+    with m.step("numeric_verification"):
+        _verify_text_numbers(words_all, proc, engine_list, m)
     for w in words_all:
         conf = w.get("confidence")
         if conf is not None and conf < CONF_REVIEW:
@@ -281,12 +284,13 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "identifiers": E.find_identifiers(normalized),
         "validation": validate_text(raw_text),
         "low_confidence_words": low_conf,
-        "metrics": m.report(),
     }
 
     if debug_dir and tables_out:
-        _debug_table_image(master, regions, tables_out, debug_dir, page_no)
+        with m.step("debug"):
+            _debug_table_image(master, regions, tables_out, debug_dir, page_no, source=img)
 
+    page_res["metrics"] = m.report()
     page_res["_table_files"] = table_files
     img = proc = proc_small = None
     return page_res
@@ -327,18 +331,15 @@ def _cell_ocr_best(engine_list: list[E.OCREngine], crop: np.ndarray,
         cands = [0.22, 0.10, 0.17]
     else:
         cands = [f, round(f * 0.6, 3), round(f * 0.36, 3)]
-    results: list[dict] = []
+    images = []
     for fac in dict.fromkeys(cands):
         s = P.pad_white(P.resize_by_factor(crop, fac))
         ok, buf = cv2.imencode(".png", s)
         if not ok:
             continue
-        m.inc("ocr_calls")
-        try:
-            r = E.ocr_any(engine_list, buf.tobytes(), region_kind=kind)
-        except Exception:
-            continue
-        results.append(r)
+        images.append(buf.tobytes())
+    m.inc("ocr_calls", len(images))
+    results = [r for r in E.ocr_many(engine_list, images, region_kind=kind) if r is not None]
     if not results:
         return {"text": "", "words": [], "confidence": None, "engine": "none"}
 
@@ -434,11 +435,13 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
     digit_band_bot = max((b[1] + b[3] for b in bases), default=H)
     out = []
     uncertain = False
+    glyphs = []
+    images = []
     for (x, y, w, h) in bases:
         # قانون شکل صفر فارسی: دایرهٔ کوچکِ در نیمهٔ پایینیِ نوار ارقام
         if h < 0.45 * med_h and w <= 1.8 * h and \
                 (y + h / 2) > (digit_band_top + digit_band_bot) / 2:
-            out.append("۰")
+            glyphs.append((None, []))
             continue
         x0m, y0m = max(0, x - h // 3), max(0, y - h // 3)
         x1m, y1m = min(W, x + w + h // 3), min(H, y + h + h // 3)
@@ -448,15 +451,25 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         g[y - y0m:y - y0m + h, x - x0m:x - x0m + w] = crop[y:y + h, x:x + w]
         # هدف 80px — کالیبره‌شده روی تست confusion ارقام (۳/۴ در ارتفاع کم مخلوط می‌شوند)
         f = P.optimal_ocr_scale(g, target_h=80.0)
-        reads = []
+        indices = []
         for fac in dict.fromkeys([f, round(f * 0.55, 3)]):
             g2 = P.pad_white(P.resize_by_factor(g, fac))
             ok, buf = cv2.imencode(".png", g2)
             if not ok:
                 continue
-            m.inc("ocr_calls")
-            res = E.ocr_any(engine_list, buf.tobytes(), region_kind="glyph",
-                            whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)
+            indices.append(len(images))
+            images.append(buf.tobytes())
+        glyphs.append((g, indices))
+    m.inc("ocr_calls", len(images))
+    readings = E.ocr_many(engine_list, images, region_kind="glyph",
+                          whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)
+    for g, indices in glyphs:
+        if g is None:
+            out.append("۰")
+            continue
+        reads = []
+        for index in indices:
+            res = readings[index] or {}
             ch = (res.get("text") or "").strip().replace("\n", " ")
             if len(ch) == 1 and ch in (FA_DIGIT_CHARS + EN_DIGIT_CHARS):
                 reads.append(ch)
@@ -578,14 +591,21 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
                                x0g:min(img_shape[1], x1g)]
             crop_g = T.strip_grid_lines(crop_g)  # خطوط شبکه در برش خام هستند
             r2 = _glyph_digit_ocr(engine_list, crop_g, m)
-            t2 = r2.get("text", "").replace("?", "")
-            if t2 and _norm_digits(t2) == _norm_digits(txt):
+            t2 = r2.get("text", "")
+            complete = re.fullmatch(r"[۰-۹0-9]{1,16}", t2)
+            if not complete:
+                # A failed parallel candidate must not turn a partial number
+                # into a replacement for the full original cell value.
+                res["needs_review"] = True
+            elif _norm_digits(t2) == _norm_digits(txt) and not r2.get("needs_review"):
                 conf = max(conf or 0, 0.97)  # دو مسیر مستقل تأیید کردند (هر سیستمی که باشد)
-            elif t2 and _norm_digits(t2) != _norm_digits(txt):
+            elif _norm_digits(t2) != _norm_digits(txt):
                 # عدم توافق واقعی: نتیجهٔ گذر تمیزتر (مستر خام) + پرچم بازبینی صریح
                 txt = t2
                 conf = None
                 res["needs_review"] = True  # بخش ۲۷: عدم توافق پنهان نمی‌شود
+            elif r2.get("needs_review"):
+                res["needs_review"] = True
         if res.get("needs_review"):
             m.low_conf_regions += 1
         cell_texts[(r, c)] = txt
@@ -599,25 +619,31 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
 
 
 def _debug_table_image(master: R.MasterPage, regions, tables, debug_dir: Path,
-                       page_no: int):
+                       page_no: int, source: np.ndarray | None = None):
     """دیباگ جدول‌ها از مستر — مستر تغییر نمی‌کند (بخش ۲۴)."""
     debug_dir.mkdir(parents=True, exist_ok=True)
-    proc = cv2.imread(str(master.path), cv2.IMREAD_GRAYSCALE)
+    proc = source if source is not None else cv2.imread(str(master.path), cv2.IMREAD_GRAYSCALE)
     if proc is None:
         return
+    # Resize grayscale first: an A4 master is ~387MP. Expanding it to BGR
+    # before shrinking needlessly allocates over 1GB for a 2400px preview.
+    scale = min(1.0, 2400.0 / max(proc.shape[:2]))
+    if scale < 1:
+        proc = cv2.resize(proc, None, fx=scale, fy=scale)
     vis = cv2.cvtColor(proc, cv2.COLOR_GRAY2BGR)
+
+    def preview_box(bbox):
+        return tuple(round(value * scale) for value in bbox)
+
     for r in regions:
-        x0, y0, x1, y1 = r.bbox
+        x0, y0, x1, y1 = preview_box(r.bbox)
         color = (0, 200, 0) if r.kind == "text" else (0, 120, 255)
-        cv2.rectangle(vis, (x0, y0), (x1, y1), color, 6)
+        cv2.rectangle(vis, (x0, y0), (x1, y1), color, max(1, round(6 * scale)))
     for t in tables:
         for cell in t["cells"]:
-            x0, y0, x1, y1 = cell["bbox"]
+            x0, y0, x1, y1 = preview_box(cell["bbox"])
             color = (0, 0, 255) if cell.get("needs_review") else (255, 0, 0)
-            cv2.rectangle(vis, (x0, y0), (x1, y1), color, 3)
-    scale = min(1.0, 2400.0 / max(vis.shape[:2]))
-    if scale < 1:
-        vis = cv2.resize(vis, None, fx=scale, fy=scale)
+            cv2.rectangle(vis, (x0, y0), (x1, y1), color, max(1, round(3 * scale)))
     cv2.imwrite(str(debug_dir / f"page_{page_no:03d}_layout.png"), vis)
 
 
@@ -649,11 +675,14 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
 
     for i in range(n_pages):
         m = Metrics()
+        engine_before = engine_list[-1].statistics()
         try:
             with m.step("render"):
                 master = R.render_master(doc[i], i + 1, master_dir, dpi=dpi)
             res = ocr_page(master, engine_list, m,
                            out_dir / "debug" if debug else None, i + 1)
+            res["metrics"].update({key: value - engine_before[key]
+                                   for key, value in engine_list[-1].statistics().items()})
             res["filename"] = pdf_path.name
             for f in res.pop("_table_files", []):
                 all_table_files.append(f)
@@ -687,6 +716,8 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
                                 for p in pages_res), default=0),
             "avg_page_seconds": round((time.perf_counter() - t0) / max(n_pages, 1), 2),
             "ocr_calls": sum(p.get("metrics", {}).get("ocr_calls", 0) for p in pages_res),
+            "ocr_processes": engine_list[-1].statistics()["ocr_processes"],
+            "ocr_cache_hits": engine_list[-1].statistics()["ocr_cache_hits"],
             "fallbacks": sum(p.get("metrics", {}).get("fallbacks", 0) for p in pages_res),
             "low_confidence_regions": sum(p.get("low_confidence_words", 0)
                                           for p in pages_res),

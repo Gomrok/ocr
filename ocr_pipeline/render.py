@@ -81,9 +81,12 @@ def render_master(page: "pymupdf.Page", page_no: int, tmp_dir: Path,
         w_px, h_px, mem_mb = estimate_render(page, eff)
 
     pix = page.get_pixmap(dpi=eff, colorspace=pymupdf.csGRAY, alpha=False)
-    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    # samples copies the whole A4 master (~387MB); samples_mv is a read-only
+    # view over the live pixmap and preserves the exact same grayscale pixels.
+    arr = np.frombuffer(pix.samples_mv, dtype=np.uint8).reshape(pix.height, pix.width)
     out = tmp_dir / f"master_p{page_no:04d}{TIFF_EXT}"
-    cv2.imwrite(str(out), arr, [cv2.IMWRITE_TIFF_COMPRESSION, 8])  # LZW lossless
+    if not cv2.imwrite(str(out), arr, [cv2.IMWRITE_TIFF_COMPRESSION, 8]):  # Deflate, lossless
+        raise OSError("Could not write the lossless master image")
     ms = MasterPage(
         path=out, width=pix.width, height=pix.height,
         requested_dpi=req_dpi, effective_dpi=eff,
@@ -92,6 +95,6 @@ def render_master(page: "pymupdf.Page", page_no: int, tmp_dir: Path,
         pdf_w_pt=page.rect.width, pdf_h_pt=page.rect.height,
         approx_mem_mb=round(mem_mb, 1),
     )
-    pix = None
     arr = None
+    pix = None
     return ms
