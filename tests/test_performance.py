@@ -11,6 +11,7 @@ import pymupdf
 
 from ocr_pipeline import engines as E
 from ocr_pipeline import pipeline as P
+from ocr_pipeline import preprocess as PRE
 from ocr_pipeline.layout import Region
 from ocr_pipeline.metrics import Metrics
 from ocr_pipeline.render import render_master
@@ -184,6 +185,53 @@ class PerformanceTests(unittest.TestCase):
                 x, y = rng.randrange(-100, 200), rng.randrange(-100, 200)
                 boxes.append((x, y, x + rng.randrange(1, 100), y + rng.randrange(1, 100)))
             self.assertEqual(E._iou(*boxes), reference(*boxes))
+
+    def test_parallel_background_preserves_every_pixel_and_stripe_boundary(self):
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (263, 317), dtype=np.uint8)
+        reference = cv2.divide(image, cv2.medianBlur(image, 31), scale=255)
+        pool = PRE.ThreadPoolExecutor
+        with patch.object(PRE, "_PARALLEL_MEDIAN_PIXELS", 0), \
+                patch.object(PRE.os, "cpu_count", return_value=24), \
+                patch.object(PRE, "ThreadPoolExecutor", wraps=pool) as executor:
+            actual = PRE.illumination_correct(image)
+        self.assertEqual(executor.call_args.kwargs["max_workers"], 4)
+        np.testing.assert_array_equal(actual, reference)
+
+    def test_small_background_and_small_cpu_do_not_start_workers(self):
+        image = np.full((160, 190), 200, np.uint8)
+        image[40:90, 30:80] = 20
+        reference = cv2.divide(image, cv2.medianBlur(image, 31), scale=255)
+        with patch.object(PRE, "ThreadPoolExecutor") as executor:
+            np.testing.assert_array_equal(PRE.illumination_correct(image), reference)
+            with patch.object(PRE, "_PARALLEL_MEDIAN_PIXELS", 0), \
+                    patch.object(PRE.os, "cpu_count", return_value=2):
+                np.testing.assert_array_equal(PRE.illumination_correct(image), reference)
+        executor.assert_not_called()
+
+    def test_vectorized_denoising_matches_original_algorithm(self):
+        rng = np.random.default_rng(13)
+        image = np.full((160, 190), 230, np.uint8)
+        image[rng.random(image.shape) < 0.035] = 10
+        image[60:70, 30:45] = 30
+        original = image.copy()
+        bw = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(bw)
+        for limit in (0, 6, 40):
+            reference = image.copy()
+            for index in range(1, count):
+                if stats[index, cv2.CC_STAT_AREA] <= limit:
+                    reference[labels == index] = 255
+            np.testing.assert_array_equal(PRE.denoise_preserve_dots(image, limit), reference)
+        np.testing.assert_array_equal(image, original)
+
+    def test_persian_dot_sized_components_are_preserved(self):
+        image = np.full((80, 100), 255, np.uint8)
+        image[10, 10] = 0
+        image[35:39, 40:44] = 0
+        actual = PRE.denoise_preserve_dots(image)
+        self.assertEqual(actual[10, 10], 255)
+        np.testing.assert_array_equal(actual[35:39, 40:44], image[35:39, 40:44])
 
     def test_incomplete_table_number_never_replaces_original(self):
         region = Region("table", (0, 0, 100, 100), ((0, 100), (0, 100)))

@@ -9,8 +9,13 @@
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import numpy as np
+
+_PARALLEL_MEDIAN_PIXELS = 16_000_000
 
 
 def analyze(img: np.ndarray) -> dict:
@@ -64,7 +69,23 @@ def deskew(img: np.ndarray, angle: float) -> np.ndarray:
 
 def illumination_correct(img: np.ndarray) -> np.ndarray:
     """حذف سایه/روشنایی ناهمگون با تقسیم بر پس‌زمینهٔ بلور شده."""
-    bg = cv2.medianBlur(img, 31)
+    workers = min(4, max(1, (os.cpu_count() or 1) // 2))
+    height = img.shape[0]
+    if img.size < _PARALLEL_MEDIAN_PIXELS or workers == 1 or height < 31 * workers:
+        bg = cv2.medianBlur(img, 31)
+    else:
+        bg = np.empty_like(img)
+
+        def blur_stripe(index):
+            first, last = index * height // workers, (index + 1) * height // workers
+            # The 15-pixel halo preserves every 31x31 neighbourhood, including
+            # stripe boundaries. Workers write disjoint rows of the output.
+            top, bottom = max(0, first - 15), min(height, last + 15)
+            tile = cv2.medianBlur(img[top:bottom], 31)
+            bg[first:last] = tile[first - top:last - top]
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ocr-background") as pool:
+            list(pool.map(blur_stripe, range(workers)))
     norm = cv2.divide(img, bg, scale=255)
     return norm
 
@@ -76,15 +97,13 @@ def denoise_preserve_dots(img: np.ndarray, max_cc_px: int = 6) -> np.ndarray:
     و اسپکِ اسکنر را حذف می‌کند و به نقطه‌ها دست نمی‌زند.
     """
     bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(bw)
-    mask = np.zeros_like(bw)
-    removed = 0
-    for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] <= max_cc_px:
-            mask[labels == i] = 255
-            removed += 1
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(bw)
+    # One lookup per pixel instead of scanning the entire 2000-DPI page for
+    # every speck. Label zero is background and must never be removed.
+    remove = stats[:, cv2.CC_STAT_AREA] <= max_cc_px
+    remove[0] = False
     out = img.copy()
-    out[mask > 0] = 255
+    out[remove[labels]] = 255
     return out
 
 
