@@ -42,6 +42,19 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["text"], "متن آزمایشی")
         self.assertEqual(result["words"][0]["confidence"], 0.95)
 
+    def test_native_persian_whitelist_uses_utf8_configuration(self):
+        engine = TesseractEngine()
+        engine.executable = "trusted-tesseract.exe"
+        whitelist = "۰۱۲۳۴۵۶۷۸۹0123456789"
+        def execute(command, **kwargs):
+            self.assertNotIn(whitelist, " ".join(command))
+            self.assertEqual(Path(command[-1]).read_text("utf-8"),
+                             "tessedit_char_whitelist " + whitelist + "\n")
+            Path(command[2] + ".txt").write_text("۱۲۳۴۵", encoding="utf-8")
+            return Mock(returncode=0)
+        with patch.object(engine, "native_ok", return_value=True), patch("ocr_pipeline.engines.subprocess.run", side_effect=execute):
+            self.assertEqual(engine.ocr_image(b"test", whitelist=whitelist)["text"], "۱۲۳۴۵")
+
 
 if __name__ == "__main__":
     unittest.main()

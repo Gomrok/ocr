@@ -558,7 +558,16 @@ class TesseractEngine(OCREngine):
                    "-c", "tessedit_create_hocr=1",
                    "-c", "tessedit_do_invert=0"]  # متن تیره روی زمینهٔ روشن (متن معکوس ناخواسته)
             if whitelist:
-                cmd += ["-c", f"tessedit_char_whitelist={whitelist}"]
+                if "\n" in whitelist or "\r" in whitelist:
+                    raise ValueError("Invalid OCR character whitelist")
+                if native:
+                    # Windows builds may encode argv using a legacy code page.
+                    # Keep Persian configuration in UTF-8 instead of argv.
+                    config = Path(outdir) / "whitelist.cfg"
+                    config.write_text(f"tessedit_char_whitelist {whitelist}\n", encoding="utf-8")
+                    cmd.append(str(config))
+                else:
+                    cmd += ["-c", f"tessedit_char_whitelist={whitelist}"]
             p = subprocess.run(cmd, capture_output=True, timeout=900)
             if p.returncode != 0:
                 raise RuntimeError("tesseract: " + p.stderr.decode(errors="replace")[:300])

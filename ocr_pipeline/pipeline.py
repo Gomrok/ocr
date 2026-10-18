@@ -226,10 +226,12 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
 
     # ── ساختار سطری متن صفحه از کلمات (بخش ۵ و ۲۱) ──
     words_all = E.merge_word_lists([words_all])
+    _verify_text_numbers(words_all, proc, engine_list, m)
     for w in words_all:
         conf = w.get("confidence")
         if conf is not None and conf < CONF_REVIEW:
             w["needs_review"] = True
+        if w.get("needs_review"):
             low_conf += 1
     lines = E.words_to_lines(words_all)
     raw_text = "\n".join(text_parts)
@@ -238,10 +240,9 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     confs = [w["confidence"] for w in words_all if w.get("confidence") is not None]
     page_conf = round(sum(confs) / len(confs), 4) if confs else None
 
-    normalized = E.normalize_text(raw_text)
-
     # متن نهایی صفحه: سطرهای بازسازی‌شده (حفظ ترتیب بصری RTL)
-    final_text = "\n".join(lines) if lines else normalized
+    final_text = "\n".join(lines) if lines else raw_text
+    normalized = E.normalize_text(final_text)
 
     # متن جدول‌ها هم در متن صفحه (Markdown) — بخش ۲۳
     tables_out.sort(key=lambda t: min(c["bbox"][1] for c in t["cells"])
@@ -264,6 +265,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "lines": lines,
         "words": [{"text": w["text"], "bbox": list(w["bbox"]),
                    "confidence": w.get("confidence"),
+                   **({"raw_ocr_text": w["raw_ocr_text"], "numeric_verified": True}
+                      if w.get("numeric_verified") else {}),
                    **({"needs_review": True} if w.get("needs_review") else {})}
                   for w in words_all],
         "raw_text": raw_text,
@@ -439,7 +442,10 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             continue
         x0m, y0m = max(0, x - h // 3), max(0, y - h // 3)
         x1m, y1m = min(W, x + w + h // 3), min(H, y + h + h // 3)
-        g = crop[y0m:y1m, x0m:x1m]
+        # Preserve padding geometry without allowing a neighbouring digit into
+        # this single-glyph recognition pass.
+        g = np.full((y1m - y0m, x1m - x0m), 255, dtype=crop.dtype)
+        g[y - y0m:y - y0m + h, x - x0m:x - x0m + w] = crop[y:y + h, x:x + w]
         # هدف 80px — کالیبره‌شده روی تست confusion ارقام (۳/۴ در ارتفاع کم مخلوط می‌شوند)
         f = P.optimal_ocr_scale(g, target_h=80.0)
         reads = []
@@ -451,10 +457,11 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             m.inc("ocr_calls")
             res = E.ocr_any(engine_list, buf.tobytes(), region_kind="glyph",
                             whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)
-            ch = (res.get("text") or "").strip().replace("\n", " ")[:1]
-            if ch and ch in (FA_DIGIT_CHARS + EN_DIGIT_CHARS):  # ZWNJ/زباله = خوانده‌نشده
+            ch = (res.get("text") or "").strip().replace("\n", " ")
+            if len(ch) == 1 and ch in (FA_DIGIT_CHARS + EN_DIGIT_CHARS):
                 reads.append(ch)
-                break  # خواندن در مقیاس بهینه کافی است؛ فقط در نبودِ خواندن fallback
+        if len(reads) < 2 or len({_norm_digits(ch) for ch in reads}) != 1:
+            uncertain = True
         if not reads:
             out.append("?")
             uncertain = True
@@ -489,6 +496,47 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         return {"text": text, "engine": "glyph_pass", "confidence": None,
                 "needs_review": True}
     return {"text": text, "engine": "glyph_pass", "confidence": None}
+
+
+def _verify_text_numbers(words: list[dict], source: np.ndarray,
+                         engines: list[E.OCREngine], metrics: Metrics) -> None:
+    """Verify confusable Persian numerals from isolated glyphs in the master.
+
+    Keep the initial reading for audit, and flag any disagreement for review.
+    Uncertain, incomplete, or mixed-text candidates never replace the original.
+    """
+    remaining = 16  # Bound extra OCR work per page.
+    height, width = source.shape[:2]
+    for word in words:
+        original = word.get("text", "")
+        if not re.fullmatch(r"[۰-۹]{2,16}", original) or not set(original) & {"۲", "۳"}:
+            continue
+        if not remaining:
+            word["needs_review"] = True
+            continue
+        remaining -= 1
+        x0, y0, x1, y1 = word["bbox"]
+        pad = max(4, int((y1 - y0) * 0.04))
+        crop = source[max(0, y0 - pad):min(height, y1 + pad),
+                      max(0, x0 - pad):min(width, x1 + pad)]
+        if not crop.size:
+            word["needs_review"] = True
+            continue
+        try:
+            result = _glyph_digit_ocr(engines, crop, metrics)
+        except (RuntimeError, OSError, ValueError):
+            word["needs_review"] = True
+            continue
+        candidate = _norm_digits(result.get("text", ""))
+        if result.get("needs_review") or not re.fullmatch(r"[0-9]{2,16}", candidate) or len(candidate) != len(original):
+            word["needs_review"] = True
+            continue
+        verified = candidate.translate(str.maketrans(EN_DIGIT_CHARS, FA_DIGIT_CHARS))
+        word["numeric_verified"] = True
+        word["raw_ocr_text"] = original
+        if verified != original:
+            word["text"] = verified
+            word["needs_review"] = True
 
 
 def _ocr_table(region: L.Region, proc: np.ndarray,
@@ -613,6 +661,7 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
             if progress_cb:
                 progress_cb({"type": "page_ok", "page": i + 1,
                              "words": len(res.get("words", [])),
+                             "needs_review": bool(res.get("low_confidence_words")),
                              "tables": len(res.get("tables", [])),
                              "source": (res.get("engines") or [engine.name])[0]})
         except Exception as exc:  # noqa: BLE001

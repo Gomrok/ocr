@@ -691,6 +691,9 @@ async function poll(id) {
     if (partial) {
       byId('runTitleText').textContent = 'پردازش پایان یافت؛ برخی صفحات نیاز به بررسی دارند';
       byId('status').querySelector('details').open = true;
+    } else if (done && Number(state.review_pages) > 0) {
+      byId('runTitleText').textContent = 'پردازش پایان یافت؛ بخشی از متن نیاز به بازبینی دارد';
+      byId('status').querySelector('details').open = true;
     }
     if (state.pages_total) {
       setProgress(100 * state.pages_done / state.pages_total);
@@ -797,11 +800,15 @@ def _make_cb(job_id: str, fname: str):
                     f"سند {fname}: {event['pages']} صفحه با کیفیت {event['dpi']} DPI")
             elif t == "page_ok":
                 job["pages_done"] += 1
+                if event.get("needs_review"):
+                    job["review_pages"] += 1
                 src = event.get("source", "")
                 src_fa = "گوگل" if "google" in src else ("محلی+eng" if "eng" in src else "محلی")
                 tbl = f"، {event['tables']} جدول" if event.get("tables") else ""
                 job["log"].append(
                     f"[{fname}] صفحه {event['page']} — {event['words']} کلمه{tbl} ({src_fa})")
+                if event.get("needs_review"):
+                    job["log"].append(f"[{fname}] بخشی از متن صفحهٔ {event['page']} نیاز به بازبینی دارد.")
             elif t == "page_error":
                 job["pages_done"] += 1
                 job["failed_pages"] += 1
@@ -920,6 +927,7 @@ def upload():
             PENDING_OWNERS.discard(owner)
         return jsonify(error="صف پردازش تکمیل است. لطفاً چند دقیقه بعد تلاش کنید."), 503
     started = False
+    job_id = None
     saved: list[Path] = []
     try:
         if shutil.disk_usage(DATA_DIR).free < 1536 * 1024 * 1024:
@@ -956,7 +964,7 @@ def upload():
             JOBS[job_id] = {
                 "owner_id": owner, "documents": documents,
                 "state": "running", "log": [], "pages_total": 0, "pages_done": 0,
-                "failed_pages": 0, "files": [], "zip": None, "file_index": 0,
+                "failed_pages": 0, "review_pages": 0, "files": [], "zip": None, "file_index": 0,
                 "file_count": len(saved), "started": datetime.now().isoformat(timespec="seconds"),
             }
         threading.Thread(target=_run_job, args=(job_id, saved, 2000), daemon=True).start()
@@ -967,6 +975,8 @@ def upload():
             QUEUE_SLOTS.release()
             with LOCK:
                 PENDING_OWNERS.discard(owner)
+                if job_id:
+                    JOBS.pop(job_id, None)
             for path in saved:
                 path.unlink(missing_ok=True)
 
