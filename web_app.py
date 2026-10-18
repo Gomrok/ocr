@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""رابط وب ربات OCR — Production Pipeline (مستر 2000 DPI).
+"""سامانهٔ پردازش تصویری گمرک با وضوح قابل انتخاب.
 
 آپلود گروهی PDF، پیشرفت زندهٔ صفحه‌به‌صفحه (progress_cb)،
 خروجی TXT + JSON + جدول‌ها (CSV/HTML/XLSX) + دیباگ + ZIP.
@@ -56,6 +56,8 @@ UPLOAD_TIMES: dict[str, deque] = {}
 PENDING_OWNERS: set[str] = set()
 LOCAL_ENGINE = TesseractEngine("fas")
 MAX_BATCH_PAGES = 300
+DPI_LEVELS = (100, 250, 500, 1000, 1500, 2000)
+DEFAULT_DPI = 2000
 
 
 @app.before_request
@@ -113,10 +115,10 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f7f8fa">
+<meta name="theme-color" content="#102A43">
 <meta name="csrf-token" content="{{ csrf_token }}">
-<meta name="description" content="سامانهٔ پردازش اسناد گمرک؛ استخراج متن فارسی و جدول از فایل‌های PDF.">
-<title>گمرک — سامانهٔ پردازش اسناد</title>
+<meta name="description" content="سامانه پردازش تصویری سامانه هوش مصنوعی گمرک؛ استخراج متن و جدول از اسناد PDF با وضوح قابل انتخاب.">
+<title>سامانه پردازش تصویری سامانه هوش مصنوعی گمرک</title>
 <link rel="preload" href="{{ url_for('static', filename='fonts/Vazir-Bold.woff2') }}" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="data:,">
 <style nonce="{{ csp_nonce }}">
@@ -129,16 +131,44 @@ PAGE = r"""<!doctype html>
 }
 :root {
   color-scheme: light;
-  --canvas: #f7f8fa;
-  --paper: #fff;
-  --ink: #282735;
-  --muted: #706b7c;
-  --line: #eae9f0;
-  --accent: #7461c5;
-  --accent-dark: #614eaf;
-  --accent-soft: #f1edf9;
-  --green: #287c65;
-  --red: #b34452;
+  --gm-brand-navy: #102A43;
+  --gm-brand-accent: #0F766E;
+  --gm-bg-page: #F8FAFC;
+  --gm-bg-surface: #FFFFFF;
+  --gm-bg-subtle: #F1F5F9;
+  --gm-text-primary: #102A43;
+  --gm-text-body: #334155;
+  --gm-text-secondary: #475569;
+  --gm-text-muted: #64748B;
+  --gm-border-subtle: #E2E8F0;
+  --gm-border-control: #7A8CA3;
+  --gm-action-primary: #1D4ED8;
+  --gm-action-hover: #1E40AF;
+  --gm-action-pressed: #1E3A8A;
+  --gm-text-on-action: #FFFFFF;
+  --gm-bg-selected: #EFF6FF;
+  --gm-focus: #1D4ED8;
+  --gm-success: #166534;
+  --gm-bg-success: #F0FDF4;
+  --gm-warning: #92400E;
+  --gm-bg-warning: #FFFBEB;
+  --gm-error: #B91C1C;
+  --gm-bg-error: #FEF2F2;
+  --gm-info: #1E40AF;
+  --gm-bg-info: #EFF6FF;
+  --gm-bg-accent: #F0FDFA;
+  --gm-bg-disabled: #E2E8F0;
+  --gm-text-disabled: #475569;
+  --canvas: var(--gm-bg-page);
+  --paper: var(--gm-bg-surface);
+  --ink: var(--gm-text-primary);
+  --muted: var(--gm-text-muted);
+  --line: var(--gm-border-subtle);
+  --accent: var(--gm-action-primary);
+  --accent-dark: var(--gm-action-hover);
+  --accent-soft: var(--gm-bg-selected);
+  --green: var(--gm-success);
+  --red: var(--gm-error);
   --radius: 20px;
 }
 * { box-sizing: border-box; }
@@ -151,132 +181,159 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 a { color: inherit; text-decoration: none; }
 button, a, .drop { transition: background .18s, border-color .18s, color .18s, box-shadow .18s, transform .18s; }
-:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
-::selection { color: #453574; background: #e5ddf9; }
+:focus-visible { outline: 3px solid var(--gm-focus); outline-offset: 4px; }
+::selection { color: var(--gm-info); background: var(--gm-bg-selected); }
 h1, h2, h3, p { margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
-.skip-link { position: fixed; top: -80px; right: 24px; z-index: 10; padding: 10px 20px; background: var(--ink); color: white; border-radius: 10px; }
+.skip-link { position: fixed; top: -80px; right: 24px; z-index: 10; padding: 10px 20px; background: var(--ink); color: var(--gm-text-on-action); border-radius: 10px; }
 .skip-link:focus { top: 12px; }
 .app-shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { background: var(--paper); border-left: 1px solid var(--line); padding: 32px 20px 22px; display: flex; flex-direction: column; gap: 40px; position: sticky; top: 0; height: 100vh; }
 .brand { display: flex; gap: 12px; align-items: center; padding-inline: 10px; }
-.brand-name { display: block; font-size: 26px; font-weight: 700; line-height: 1.3; letter-spacing: -.8px; }
-.brand-caption { display: block; font-size: 10px; color: var(--muted); margin-top: 3px; }
+.brand-name { display: block; font-size: 18px; font-weight: 700; line-height: 1.9; }
+.brand-caption { display: block; font-size: 11px; color: var(--gm-brand-accent); margin-top: 4px; }
 .nav-caption { font-size: 10px; font-weight: 700; color: var(--muted); padding-inline: 15px; margin-bottom: 14px; }
 .navigation { display: grid; gap: 8px; }
-.nav-item { display: flex; align-items: center; gap: 11px; min-height: 46px; padding: 10px 14px; border: 0; border-radius: 10px; text-align: right; background: transparent; color: #6f6c7e; font-size: 12px; width: 100%; }
-.nav-item:hover { background: #f7f6fa; color: var(--ink); }
+.nav-item { display: flex; align-items: center; gap: 11px; min-height: 46px; padding: 10px 14px; border: 0; border-radius: 10px; text-align: right; background: transparent; color: var(--gm-text-secondary); font-size: 12px; width: 100%; }
+.nav-item:hover { background: var(--gm-bg-subtle); color: var(--ink); }
 .nav-item.active { background: var(--accent-soft); color: var(--accent-dark); font-weight: 700; }
-.nav-count { margin-inline-start: auto; font-size: 10px; background: #f0eff3; color: #6c687b; border-radius: 6px; min-width: 23px; text-align: center; padding: 0 5px; }
+.nav-count { margin-inline-start: auto; font-size: 10px; background: var(--gm-bg-subtle); color: var(--gm-text-secondary); border-radius: 6px; min-width: 23px; text-align: center; padding: 0 5px; }
 .sidebar-bottom { margin-top: auto; }
-.sidebar-note { background: #f8f6fc; border: 1px solid #f0ecf8; border-radius: 14px; padding: 18px 16px; }
+.sidebar-note { background: var(--gm-bg-accent); border: 1px solid var(--line); border-radius: 14px; padding: 18px 16px; }
 .sidebar-note strong { display: block; font-size: 12px; font-weight: 700; }
 .sidebar-note p { font-size: 10px; color: var(--muted); line-height: 1.9; margin-top: 5px; }
 .sidebar-foot { display: flex; align-items: center; gap: 8px; padding: 20px 12px 0; color: var(--muted); font-size: 10px; }
 .main-area { min-width: 0; }
-.topbar { height: 73px; display: flex; justify-content: space-between; align-items: center; padding: 0 44px; border-bottom: 1px solid var(--line); background: #ffffff70; }
+.topbar { height: 73px; display: flex; justify-content: space-between; align-items: center; padding: 0 44px; border-bottom: 1px solid var(--line); background: var(--paper); }
 .breadcrumb { display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--muted); }
-.breadcrumb strong { color: #555161; font-weight: 700; }
+.breadcrumb strong { color: var(--gm-text-body); font-weight: 700; }
 .topbar-actions { display: flex; gap: 18px; align-items: center; }
 .language { font-size: 10px; color: var(--muted); border-left: 1px solid var(--line); padding-left: 18px; letter-spacing: .4px; }
-.help-button { display: flex; align-items: center; gap: 7px; min-height: 44px; padding: 4px 0; border: 0; background: transparent; color: #625e71; font-size: 11px; }
+.help-button { display: flex; align-items: center; gap: 7px; min-height: 44px; padding: 4px 0; border: 0; background: transparent; color: var(--gm-text-secondary); font-size: 11px; }
 .help-button:hover { color: var(--accent-dark); }
 .content { max-width: 1250px; margin: auto; padding: 32px 44px 24px; }
 .intro { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 26px; }
-.eyebrow { display: flex; gap: 7px; align-items: center; color: var(--accent); font-size: 10px; font-weight: 700; margin-bottom: 9px; }
+.eyebrow { display: flex; gap: 7px; align-items: center; color: var(--gm-brand-accent); font-size: 10px; font-weight: 700; margin-bottom: 9px; }
 h1 { font-size: clamp(25px, 2.4vw, 35px); line-height: 1.7; font-weight: 700; letter-spacing: -1.1px; }
-h1 em { font-style: normal; color: var(--accent); }
+h1 em { font-style: normal; color: var(--gm-brand-accent); }
 .intro-copy { font-size: 12px; color: var(--muted); margin-top: 8px; max-width: 660px; line-height: 2; }
-.steps { display: flex; list-style: none; margin: 0 0 26px; padding: 16px 25px; border: 1px solid var(--line); border-radius: 13px; background: #ffffffb5; }
+.steps { display: flex; list-style: none; margin: 0 0 26px; padding: 16px 25px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); }
 .step { display: flex; flex: 1; align-items: center; gap: 10px; color: var(--muted); position: relative; font-size: 11px; }
 .step:not(:last-child)::after { content: ''; flex: 1; height: 1px; background: var(--line); margin: 0 22px; }
 .step:last-child { flex: 0 0 auto; }
-.step-number { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: #f2f1f5; color: var(--muted); font-size: 11px; font-weight: 700; flex-shrink: 0; }
+.step-number { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--gm-bg-subtle); color: var(--gm-text-secondary); font-size: 11px; font-weight: 700; flex-shrink: 0; }
 .step.active { color: var(--accent-dark); font-weight: 700; }
-.step.active .step-number { color: var(--accent-dark); background: #eee8fa; box-shadow: 0 0 0 4px #f7f4fc; }
-.step.complete { color: #5b5868; }
-.step.complete .step-number { color: var(--green); background: #eaf5ef; }
+.step.active .step-number { color: var(--accent-dark); background: var(--accent-soft); box-shadow: 0 0 0 4px var(--canvas); }
+.step.complete { color: var(--gm-text-secondary); }
+.step.complete .step-number { color: var(--green); background: var(--gm-bg-success); }
 .workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 22px; align-items: start; }
-.panel { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 3px 5px #2c243102; min-width: 0; }
+.panel { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 3px 5px rgb(16 42 67 / 2%); min-width: 0; }
 .upload-panel { padding: 26px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 21px; }
 .heading-label { display: flex; align-items: center; gap: 10px; }
 h2 { font-size: 15px; font-weight: 700; }
 .section-index { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.drop { position: relative; border: 1.5px dashed #d8cee9; border-radius: 14px; background: #fcfaff; padding: 32px 16px 27px; text-align: center; cursor: pointer; }
-.drop:hover, .drop.hover { background: #f5f0fc; border-color: var(--accent); }
-.drop.hover { box-shadow: inset 0 0 0 3px #eae1f7; }
+.drop { position: relative; border: 1.5px dashed var(--gm-border-control); border-radius: 14px; background: var(--canvas); padding: 32px 16px 27px; text-align: center; cursor: pointer; }
+.drop:hover, .drop.hover { background: var(--accent-soft); border-color: var(--accent); }
+.drop.hover { box-shadow: inset 0 0 0 3px var(--line); }
 .drop[aria-disabled="true"] { cursor: wait; opacity: .65; }
-.drop-title { display: block; font-weight: 700; font-size: 15px; color: #51475f; }
+.drop-title { display: block; font-weight: 700; font-size: 15px; color: var(--gm-text-body); }
 .drop-description { display: block; margin-top: 6px; font-size: 11px; color: var(--muted); }
-.select-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; margin-top: 18px; border: 1px solid #e0d7ee; padding: 8px 18px; border-radius: 8px; background: #fff; color: #665283; font-size: 12px; font-weight: 700; box-shadow: 0 2px 3px #68537904; }
+.select-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; margin-top: 18px; border: 1px solid var(--gm-border-control); padding: 8px 18px; border-radius: 8px; background: var(--paper); color: var(--accent-dark); font-size: 12px; font-weight: 700; }
 .upload-limits { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 10px; margin-top: 11px; }
 .upload-limits span { display: inline-flex; gap: 5px; align-items: center; }
 .selection { margin-top: 24px; scroll-margin-top: 24px; }
 .selection-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.selection-header h3 { font-size: 12px; font-weight: 700; color: #656070; }
+.selection-header h3 { font-size: 12px; font-weight: 700; color: var(--gm-text-secondary); }
 .selection-count { font-size: 11px; color: var(--muted); }
 .selection-empty { padding: 12px 0 18px; color: var(--muted); font-size: 11px; }
-.file-list { display: grid; gap: 7px; max-height: 232px; overflow-y: auto; margin-top: 12px; scrollbar-width: thin; scrollbar-color: #ddd5eb transparent; }
+.file-list { display: grid; gap: 7px; max-height: 232px; overflow-y: auto; margin-top: 12px; scrollbar-width: thin; scrollbar-color: var(--gm-border-control) transparent; }
 .file-list:empty { display: none; }
-.file-row { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #efedf3; border-radius: 10px; background: #fdfcfe; }
-.file-type { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 38px; border: 1px solid #e9e2f2; border-radius: 7px; background: #f5f0fa; color: #756383; font: 700 9px/1 Vazir, sans-serif; }
+.file-row { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); }
+.file-type { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 38px; border: 1px solid var(--line); border-radius: 7px; background: var(--accent-soft); color: var(--gm-info); font: 700 9px/1 Vazir, sans-serif; }
 .file-description { flex: 1; min-width: 0; }
 .file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 700; }
 .file-size { color: var(--muted); font-size: 10px; }
-.text-button { display: inline-grid; place-items: center; min-width: 44px; min-height: 44px; padding: 7px 10px; font-size: 11px; border: 0; border-radius: 9px; background: transparent; color: #706b7c; flex-shrink: 0; }
-.text-button:hover { background: #f0ebf6; color: var(--accent-dark); }
+.text-button { display: inline-grid; place-items: center; min-width: 44px; min-height: 44px; padding: 7px 10px; font-size: 11px; border: 0; border-radius: 9px; background: transparent; color: var(--gm-text-secondary); flex-shrink: 0; }
+.text-button:hover { background: var(--accent-soft); color: var(--accent-dark); }
 .form-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--line); padding-top: 20px; margin-top: 2px; }
 .footer-hint { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
-.primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 16px; min-height: 44px; padding: 10px 21px; background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }
-.primary-button:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); box-shadow: 0 4px 12px #7461c529; transform: translateY(-1px); }
-.primary-button:disabled { background: #eeebf3; color: #9991a8; border-color: #eeebf3; }
+.primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 16px; min-height: 44px; padding: 10px 21px; background: var(--accent); color: var(--gm-text-on-action); border: 1px solid var(--accent); border-radius: 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.primary-button:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); box-shadow: 0 4px 12px rgb(29 78 216 / 16%); transform: translateY(-1px); }
+.primary-button:active:not(:disabled) { background: var(--gm-action-pressed); border-color: var(--gm-action-pressed); transform: none; }
+.primary-button:disabled { background: var(--gm-bg-disabled); color: var(--gm-text-disabled); border-color: var(--gm-bg-disabled); }
+.output-column { display: grid; gap: 20px; min-width: 0; }
 .results-panel { overflow: hidden; scroll-margin-top: 24px; }
 .results-panel > .panel-heading { padding: 24px 22px 0; margin-bottom: 0; }
-.result-count { font-size: 10px; padding: 0 6px; min-width: 22px; text-align: center; border-radius: 5px; color: var(--muted); background: #f3f1f6; }
+.result-count { font-size: 10px; padding: 0 6px; min-width: 22px; text-align: center; border-radius: 5px; color: var(--gm-text-secondary); background: var(--gm-bg-subtle); }
 .result-empty { padding: 27px 22px 24px; text-align: center; }
-.result-empty h3 { font-size: 13px; font-weight: 700; color: #625a72; }
+.result-empty h3 { font-size: 13px; font-weight: 700; color: var(--gm-text-secondary); }
 .result-empty p { margin: 7px auto 0; max-width: 210px; font-size: 11px; line-height: 2; color: var(--muted); }
 .output-capabilities { list-style: none; margin: 0; padding: 17px 22px; border-top: 1px solid var(--line); display: grid; gap: 14px; }
-.output-capabilities li { display: flex; align-items: center; gap: 9px; color: #706778; font-size: 11px; }
-.output-capabilities small { margin-inline-start: auto; color: #756a83; font-size: 9px; }
-.formats { display: flex; justify-content: center; flex-wrap: wrap; gap: 5px; background: #fbfafc; border-top: 1px solid var(--line); padding: 13px 18px; }
-.formats span { color: #756a83; border: 1px solid #eae5f0; border-radius: 4px; padding: 1px 5px; font-size: 9px; letter-spacing: .5px; background: #fff; }
+.output-capabilities li { display: flex; align-items: center; gap: 9px; color: var(--gm-text-secondary); font-size: 11px; }
+.output-capabilities small { margin-inline-start: auto; color: var(--muted); font-size: 9px; }
+.formats { display: flex; justify-content: center; flex-wrap: wrap; gap: 5px; background: var(--canvas); border-top: 1px solid var(--line); padding: 13px 18px; }
+.formats span { color: var(--gm-text-secondary); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 9px; letter-spacing: .5px; background: var(--paper); }
 .files { padding: 20px 16px; }
 .download-list { display: grid; gap: 7px; max-height: 360px; overflow-y: auto; scrollbar-width: thin; }
-.download-link { display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid var(--line); border-radius: 9px; padding: 9px; color: #6d5a86; background: #fff; }
-.download-link:hover { background: #f8f4fc; border-color: #d4c9e6; }
+.download-link { display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid var(--line); border-radius: 9px; padding: 9px; color: var(--gm-info); background: var(--paper); }
+.download-link:hover { background: var(--accent-soft); border-color: var(--gm-border-control); }
 .download-link .file-type { width: 30px; height: 31px; font-size: 8px; }
 .download-link .file-name { flex: 1; min-width: 0; font-size: 11px; }
-.zip-link { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: 43px; background: var(--accent); color: white; border-radius: 8px; font-size: 10px; font-weight: 700; margin-bottom: 13px; }
+.zip-link { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: 44px; background: var(--accent); color: var(--gm-text-on-action); border-radius: 8px; font-size: 10px; font-weight: 700; margin-bottom: 13px; }
 .zip-link:hover { background: var(--accent-dark); }
-.notice { display: flex; align-items: flex-start; gap: 9px; margin: 15px 0; border: 1px solid #f0dce0; background: #fff7f8; border-radius: 10px; padding: 11px 13px; font-size: 11px; color: var(--red); }
+.notice { display: flex; align-items: flex-start; gap: 9px; margin: 15px 0; border: 1px solid var(--gm-error); background: var(--gm-bg-error); border-radius: 10px; padding: 11px 13px; font-size: 11px; color: var(--red); }
+.quality-panel { padding: 22px; }
+.quality-panel h2 { font-size: 14px; }
+.quality-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.quality-caption { margin-top: 3px; font-size: 10px; color: var(--gm-text-secondary); }
+.quality-reading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.quality-value { color: var(--gm-brand-accent); background: var(--gm-bg-accent); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; font-size: 14px; line-height: 1.8; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.quality-level { color: var(--gm-text-secondary); font-size: 10px; }
+.quality-control { --dpi-fill: 100%; margin-top: 12px; direction: ltr; }
+.quality-track { position: relative; height: 44px; }
+.quality-range { appearance: none; -webkit-appearance: none; display: block; width: 100%; height: 44px; margin: 0; padding: 0; background: transparent; cursor: pointer; border-radius: 8px; }
+.quality-range::-webkit-slider-runnable-track { height: 14px; border-radius: 20px; background: linear-gradient(to right, var(--gm-brand-accent) var(--dpi-fill), var(--gm-bg-disabled) var(--dpi-fill)); box-shadow: inset 0 0 0 1px var(--gm-border-control); }
+.quality-range::-moz-range-track { height: 14px; border-radius: 20px; background: linear-gradient(to right, var(--gm-brand-accent) var(--dpi-fill), var(--gm-bg-disabled) var(--dpi-fill)); box-shadow: inset 0 0 0 1px var(--gm-border-control); }
+.quality-range::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 28px; height: 28px; margin-top: -7px; border-radius: 50%; border: 2px solid var(--gm-brand-accent); background: var(--paper); box-shadow: 0 2px 6px rgb(16 42 67 / 18%); position: relative; z-index: 1; }
+.quality-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--gm-brand-accent); background: var(--paper); box-shadow: 0 2px 6px rgb(16 42 67 / 18%); }
+.quality-range:disabled { cursor: not-allowed; }
+.quality-range:disabled::-webkit-slider-thumb { border-color: var(--gm-text-disabled); background: var(--gm-bg-subtle); }
+.quality-range:disabled::-moz-range-thumb { border-color: var(--gm-text-disabled); background: var(--gm-bg-subtle); }
+.quality-ticks { display: flex; justify-content: space-between; position: absolute; inset: 20px 12px auto; pointer-events: none; }
+.quality-ticks span { width: 4px; height: 4px; border-radius: 50%; background: var(--paper); box-shadow: 0 0 0 1px var(--gm-border-control); }
+.quality-stops { display: flex; justify-content: space-between; margin: 0 -2px; font-size: 9px; color: var(--gm-text-secondary); font-variant-numeric: tabular-nums; }
+.quality-stops span { width: 30px; text-align: center; }
+.quality-stops .selected { color: var(--gm-brand-accent); }
+.quality-endpoints { display: flex; justify-content: space-between; margin-top: 11px; font-size: 10px; color: var(--gm-text-secondary); }
+.quality-hint { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--gm-text-secondary); font-size: 10px; line-height: 2; }
+.run-resolution { color: var(--gm-text-secondary); font-size: 11px; margin-top: 8px; }
 .run-panel { margin-top: 22px; padding: 24px 26px; }
 .run-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .run-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
-.tag { color: var(--accent-dark); background: #f3effb; border-radius: 6px; padding: 3px 9px; font-size: 10px; }
-.run-panel[data-state="done"] .tag { background: #edf7f2; color: var(--green); }
-.run-panel[data-state="error"] .tag { background: #fff0f2; color: var(--red); }
+.tag { color: var(--accent-dark); background: var(--gm-bg-info); border-radius: 6px; padding: 3px 9px; font-size: 10px; }
+.run-panel[data-state="done"] .tag { background: var(--gm-bg-success); color: var(--green); }
+.run-panel[data-state="error"] .tag { background: var(--gm-bg-error); color: var(--red); }
 .progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0 9px; color: var(--muted); font-size: 11px; }
 .progress-value { color: var(--accent); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; flex-shrink: 0; }
-.bar { height: 5px; border-radius: 5px; background: #f0edf5; overflow: hidden; }
+.bar { height: 5px; border-radius: 5px; background: var(--gm-bg-disabled); overflow: hidden; }
 .bar > div { width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .35s; }
 .run-panel[data-state="done"] .bar > div { background: var(--green); }
 .run-panel[data-state="error"] .bar > div { background: var(--red); }
 .log-details { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 20px; }
-.log-details summary { color: #706778; font-size: 11px; cursor: pointer; min-height: 44px; }
-.log { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto; background: #faf9fc; border: 1px solid #efecf4; padding: 13px; border-radius: 9px; font-size: 11px; line-height: 2; color: #71667f; scrollbar-width: thin; }
+.log-details summary { color: var(--gm-text-secondary); font-size: 11px; cursor: pointer; min-height: 44px; }
+.log { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto; background: var(--canvas); border: 1px solid var(--line); padding: 13px; border-radius: 9px; font-size: 11px; line-height: 2; color: var(--gm-text-body); scrollbar-width: thin; }
 .workspace-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; color: var(--muted); margin-top: 25px; font-size: 9px; }
 .workspace-foot span { display: inline-flex; align-items: center; gap: 6px; }
 .workspace-foot b { font-weight: 700; color: var(--muted); letter-spacing: .8px; font-size: 8px; }
-dialog { width: min(460px, calc(100% - 32px)); padding: 26px; border: 1px solid var(--line); border-radius: 20px; background: #fff; color: var(--ink); box-shadow: 0 24px 90px #211a3430; }
-dialog::backdrop { background: #20192f50; backdrop-filter: blur(4px); }
+dialog { width: min(460px, calc(100% - 32px)); padding: 26px; border: 1px solid var(--line); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: 0 24px 90px rgb(16 42 67 / 18%); }
+dialog::backdrop { background: rgb(16 42 67 / 32%); backdrop-filter: blur(4px); }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; }
 .dialog-heading h2 { font-size: 16px; }
 .guide-steps { padding-right: 22px; margin: 0; display: grid; gap: 16px; font-size: 12px; }
 .guide-steps li::marker { color: var(--accent); font-weight: 700; }
 .guide-steps p { color: var(--muted); font-size: 11px; margin-top: 3px; }
-.guide-note { font-size: 11px; line-height: 2; margin: 20px 0; padding: 12px; background: #f7f4fc; border-radius: 9px; color: #72647f; }
+.guide-note { font-size: 11px; line-height: 2; margin: 20px 0; padding: 12px; background: var(--gm-bg-subtle); border-radius: 9px; color: var(--gm-text-secondary); }
 .dialog-close { width: 100%; }
 @media (min-width: 1550px) { .content { padding-top: 48px; } .drop { padding-block: 45px 36px; } .intro { margin-bottom: 38px; } }
 @media (max-width: 1190px) {
@@ -308,8 +365,8 @@ dialog::backdrop { background: #20192f50; backdrop-filter: blur(4px); }
   .app-shell { display: block; }
   .sidebar { position: relative; height: auto; padding: 16px 20px 0; gap: 17px; border-left: 0; border-bottom: 1px solid var(--line); }
   .brand { padding: 0; }
-  .brand-name { font-size: 24px; }
-  .brand-caption { font-size: 9px; }
+  .brand-name { font-size: 18px; }
+  .brand-caption { font-size: 10px; }
   .nav-caption, .sidebar-bottom, .navigation .nav-count { display: none; }
   .navigation { display: flex; gap: 16px; }
   .nav-item { width: auto; padding: 10px 1px 12px; border-radius: 0; min-height: 44px; gap: 7px; font-size: 10px; white-space: nowrap; border-bottom: 2px solid transparent; }
@@ -367,9 +424,9 @@ dialog::backdrop { background: #20192f50; backdrop-filter: blur(4px); }
 <a href="#workspace" class="skip-link">رفتن به محتوای اصلی</a>
 <div class="app-shell">
   <aside class="sidebar" aria-label="ناوبری اصلی">
-    <a class="brand" href="#workspace" aria-label="گمرک، سامانهٔ پردازش اسناد">
+    <a class="brand" href="#workspace" aria-label="سامانه پردازش تصویری سامانه هوش مصنوعی گمرک">
 
-      <span><strong class="brand-name">گمرک</strong><span class="brand-caption">سامانهٔ پردازش اسناد</span></span>
+      <span><strong class="brand-name">سامانه پردازش تصویری</strong><span class="brand-caption">سامانه هوش مصنوعی گمرک</span></span>
     </a>
     <div>
       <p class="nav-caption">خدمات پردازش اسناد</p>
@@ -385,7 +442,7 @@ dialog::backdrop { background: #20192f50; backdrop-filter: blur(4px); }
         <strong>استخراج متن و اطلاعات</strong>
         <p>استخراج متن و جدول از اسناد فارسی و دریافت خروجی در قالب‌های استاندارد.</p>
       </div>
-      <div class="sidebar-foot">سامانهٔ پردازش اسناد Gomrok</div>
+      <div class="sidebar-foot">مرکز پردازش اسناد گمرک</div>
     </div>
   </aside>
   <div class="main-area">
@@ -423,29 +480,46 @@ dialog::backdrop { background: #20192f50; backdrop-filter: blur(4px); }
             <div class="form-footer"><span class="footer-hint">پردازش اسناد فارسی و انگلیسی</span><button class="primary-button" type="submit" id="go" disabled><span id="goLabel">شروع پردازش</span></button></div>
           </form>
         </section>
+        <div class="output-column">
         <section class="panel results-panel" id="results" aria-labelledby="resultsHeading">
-          <div class="panel-heading"><div class="heading-label"><h2 id="resultsHeading">فایل‌های خروجی</h2></div><span class="result-count" id="resultCount">۰</span></div>
+          <div class="panel-heading"><div class="heading-label"><h2 id="resultsHeading">خروجی‌های شما</h2></div><span class="result-count" id="resultCount">۰</span></div>
           <div class="result-empty" id="resultEmpty"><h3 id="resultEmptyTitle">فایلی برای دریافت موجود نیست</h3><p id="resultEmptyText">پس از پایان پردازش، فایل‌های خروجی در این بخش نمایش داده می‌شوند.</p></div>
           <div class="files" id="files" hidden><div id="zipFile"></div><div class="download-list" id="downloadList" aria-label="دانلود خروجی‌ها"></div></div>
           <ul class="output-capabilities"><li>متن قابل ویرایش<small lang="en">TXT</small></li><li>جدول‌های استخراج‌شده<small lang="en">XLSX</small></li><li>دادهٔ ساختاریافته<small lang="en">JSON</small></li></ul>
           <div class="formats" aria-label="قالب‌های خروجی" dir="ltr"><span>TXT</span><span>JSON</span><span>CSV</span><span>XLSX</span><span>HTML</span><span>ZIP</span></div>
         </section>
+        <section class="panel quality-panel" aria-labelledby="qualityHeading">
+          <div class="quality-heading"><h2 id="qualityHeading"><label for="dpiControl">قدرت استخراج</label></h2><output class="quality-value" id="dpiValue" for="dpiControl" dir="ltr" aria-live="off">۲۰۰۰ DPI</output></div>
+          <div class="quality-reading"><span class="quality-caption">وضوح پردازش سند</span><span class="quality-level" id="dpiLevel">سطح ۶ از ۶</span></div>
+          <div class="quality-control" id="qualityControl">
+            <div class="quality-track">
+              <div class="quality-ticks" aria-hidden="true">{% for dpi in dpi_levels %}<span></span>{% endfor %}</div>
+              <input class="quality-range" id="dpiControl" type="range" min="0" max="{{ dpi_levels|length - 1 }}" step="1" value="{{ dpi_levels.index(default_dpi) }}" dir="ltr" aria-valuetext="۲۰۰۰ DPI، سطح ۶ از ۶" aria-describedby="qualityHint qualityScale">
+            </div>
+            <div class="quality-stops" id="dpiStops" aria-hidden="true" lang="en">{% for dpi in dpi_levels %}<span data-dpi="{{ dpi }}">{{ dpi }}</span>{% endfor %}</div>
+          </div>
+          <div class="quality-endpoints" dir="ltr" aria-hidden="true"><span dir="rtl">پردازش سبک‌تر</span><span dir="rtl">جزئیات بیشتر</span></div>
+          <p class="quality-hint" id="qualityHint">وضوح بالاتر، پردازش سنگین‌تر. دقت استخراج به کیفیت فایل اصلی وابسته است.</p>
+          <p class="sr-only" id="qualityScale">شش سطح وضوح: ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ و ۲۰۰۰ DPI. برای انتخاب، نشانگر را بکشید یا از کلیدهای جهت‌نما استفاده کنید. این تنظیم فقط پیش از شروع هر نوبت قابل تغییر است.</p>
+        </section>
+        </div>
       </div>
       <section class="panel run-panel" id="status" data-state="running" aria-labelledby="runTitle" hidden>
         <div class="run-heading"><h2 class="run-title" id="runTitle"><span id="runTitleText">در حال پردازش سندها</span></h2><span class="tag" id="tag" role="status" aria-live="polite">در انتظار شروع</span></div>
+        <p class="run-resolution">وضوح این نوبت: <bdi id="runDpi" dir="ltr"></bdi></p>
         <div class="progress-meta"><span id="info">در حال آماده‌سازی فایل‌ها…</span><span class="progress-value" id="progressValue">۰٪</span></div>
         <div class="bar" id="progressBar" role="progressbar" aria-label="پیشرفت پردازش" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="fill"></div></div>
         <button class="select-button" id="retryStatus" type="button" hidden>بررسی دوبارهٔ وضعیت</button>
         <details class="log-details"><summary>جزئیات پردازش</summary><div class="log" id="log" role="log" aria-live="off" aria-label="رویدادهای پردازش" tabindex="0"></div></details>
       </section>
-      <footer class="workspace-foot"><span>سامانهٔ استخراج متن از اسناد</span><b lang="en" dir="ltr">GOMROK DOCUMENT PROCESSING</b></footer>
+      <footer class="workspace-foot"><span>سامانه هوش مصنوعی گمرک</span><b lang="en" dir="ltr">GOMROK IMAGE PROCESSING</b></footer>
       <noscript><p class="notice">برای انتخاب و پردازش فایل‌ها، جاوااسکریپت مرورگر را فعال کنید.</p></noscript>
     </main>
   </div>
 </div>
 <dialog id="helpDialog" aria-labelledby="helpTitle">
   <div class="dialog-heading"><h2 id="helpTitle">راهنمای پردازش اسناد</h2><button class="text-button" type="button" id="closeHelp" aria-label="بستن راهنما">بستن</button></div>
-  <ol class="guide-steps"><li><strong>فایل‌های PDF را اضافه کنید</strong><p>انتخاب گروهی یا کشیدن و رها کردن؛ مجموع حجم فایل‌ها در هر نوبت کمتر از ۵۰۰ مگابایت باشد.</p></li><li><strong>پردازش را شروع کنید</strong><p>پیشرفت صفحه‌ها و جزئیات پردازش را در همین صفحه دنبال کنید. پردازش اسناد بزرگ ممکن است زمان‌بر باشد.</p></li><li><strong>فایل‌های خروجی را دریافت کنید</strong><p>فایل‌های خروجی را به‌صورت جداگانه یا در یک بستهٔ ZIP دریافت نمایید. خروجی جدول برای اسناد جدول‌دار تولید می‌شود.</p></li></ol>
+  <ol class="guide-steps"><li><strong>فایل‌های PDF را اضافه کنید</strong><p>انتخاب گروهی یا کشیدن و رها کردن؛ مجموع حجم فایل‌ها در هر نوبت کمتر از ۵۰۰ مگابایت باشد.</p></li><li><strong>وضوح را انتخاب و پردازش را شروع کنید</strong><p>در بخش «قدرت استخراج» یکی از شش سطح ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ یا ۲۰۰۰ DPI را انتخاب نمایید. پیش‌فرض ۲۰۰۰ DPI است؛ وضوح بالاتر معمولاً زمان و منابع بیشتری نیاز دارد و دقت تضمین‌شده نیست.</p></li><li><strong>فایل‌های خروجی را دریافت کنید</strong><p>پیشرفت صفحه‌ها را دنبال کنید و فایل‌های خروجی را به‌صورت جداگانه یا در یک بستهٔ ZIP دریافت نمایید. خروجی جدول برای اسناد جدول‌دار تولید می‌شود.</p></li></ol>
   <p class="guide-note">پردازش با موتورهای OCR تنظیم‌شده در پروژه انجام می‌شود. در صورت دریافت خطای موتور، تنظیمات سرویس را بررسی کنید.</p>
   <button class="primary-button dialog-close" type="button" id="confirmHelp">متوجه شدم</button>
 </dialog>
@@ -466,6 +540,10 @@ const go = byId('go');
 const form = byId('f');
 const help = byId('helpDialog');
 const number = value => new Intl.NumberFormat('fa-IR').format(value);
+const dpiLevels = {{ dpi_levels|tojson }};
+const defaultDpi = {{ default_dpi|tojson }};
+const dpiControl = byId('dpiControl');
+const selectedDpi = () => dpiLevels[Number(dpiControl.value)] || defaultDpi;
 const maxBatchBytes = 500 * 1024 * 1024;
 let selectedFiles = [];
 let busy = false;
@@ -474,6 +552,22 @@ let controller;
 let outputSignature = '';
 let activeJobId = null;
 
+function renderDpi() {
+  const dpi = selectedDpi();
+  const index = dpiLevels.indexOf(dpi);
+  const valueText = number(dpi) + ' DPI';
+  const levelText = 'سطح ' + number(index + 1) + ' از ' + number(dpiLevels.length);
+  byId('dpiValue').textContent = valueText;
+  byId('dpiLevel').textContent = levelText;
+  dpiControl.setAttribute('aria-valuetext', valueText + '، ' + levelText);
+  byId('qualityControl').style.setProperty('--dpi-fill', 100 * index / (dpiLevels.length - 1) + '%');
+  byId('dpiStops').querySelectorAll('span').forEach(stop => {
+    stop.classList.toggle('selected', Number(stop.dataset.dpi) === dpi);
+  });
+}
+dpiControl.addEventListener('input', renderDpi);
+dpiControl.addEventListener('change', renderDpi);
+renderDpi();
 
 function notice(message = '') {
   byId('errorText').textContent = message;
@@ -571,6 +665,7 @@ function setBusy(value, label = 'در حال پردازش…') {
   form.setAttribute('aria-busy', String(value));
   drop.setAttribute('aria-disabled', String(value));
   fileInput.disabled = value;
+  dpiControl.disabled = value;
   byId('goLabel').textContent = value ? label : 'شروع پردازش';
   renderSelection();
 }
@@ -673,6 +768,7 @@ async function poll(id) {
     const state = await requestJson('/status/' + encodeURIComponent(id));
     if (!['running', 'done', 'error'].includes(state.state)) throw new Error('وضعیت پردازش قابل دریافت نیست. دوباره بررسی کنید.');
     byId('retryStatus').hidden = true;
+    if (dpiLevels.includes(state.dpi)) byId('runDpi').textContent = number(state.dpi) + ' DPI';
     const names = Array.isArray(state.files) ? state.files.filter(name => typeof name === 'string') : [];
     const zip = typeof state.zip === 'string' ? state.zip : null;
     renderOutputs(id, names, zip);
@@ -735,6 +831,7 @@ form.addEventListener('submit', async event => {
   notice();
   const body = new FormData();
   selectedFiles.forEach(file => body.append('pdfs', file));
+  body.append('dpi', String(selectedDpi()));
   setBusy(true, 'در حال ارسال…');
   setStep(0);
   try {
@@ -749,6 +846,7 @@ form.addEventListener('submit', async event => {
     statusBox.dataset.state = 'running';
     byId('runTitleText').textContent = 'در حال پردازش سندها';
     tag.textContent = 'در حال پردازش';
+    byId('runDpi').textContent = number(data.dpi || selectedDpi()) + ' DPI';
     info.textContent = 'در حال آماده‌سازی فایل‌ها…';
     log.textContent = '';
     setProgress(0);
@@ -797,7 +895,7 @@ def _make_cb(job_id: str, fname: str):
             if t == "start":
                 job["pages_total"] += event["pages"]
                 job["log"].append(
-                    f"سند {fname}: {event['pages']} صفحه با کیفیت {event['dpi']} DPI")
+                    f"سند {fname}: {event['pages']} صفحه با وضوح {event['dpi']} DPI")
             elif t == "page_ok":
                 job["pages_done"] += 1
                 if event.get("needs_review"):
@@ -896,7 +994,8 @@ def index():
     session.setdefault("owner_id", uuid.uuid4().hex)
     session.setdefault("csrf_token", secrets.token_urlsafe(32))
     session.permanent = True
-    return render_template_string(PAGE, csrf_token=session["csrf_token"], csp_nonce=g.csp_nonce)
+    return render_template_string(PAGE, csrf_token=session["csrf_token"], csp_nonce=g.csp_nonce,
+                                  dpi_levels=DPI_LEVELS, default_dpi=DEFAULT_DPI)
 
 
 @app.get("/healthz")
@@ -939,8 +1038,10 @@ def upload():
             if not file.filename or not file.filename.lower().endswith(".pdf") or file.stream.read(5) != b"%PDF-":
                 return jsonify(error="فقط فایل PDF معتبر قابل پردازش است."), 400
             file.stream.seek(0)
-        if request.form.get("dpi", "2000") != "2000":
-            return jsonify(error="تنظیمات کیفیت پردازش معتبر نیست."), 400
+        values = request.form.getlist("dpi")
+        if len(values) > 1 or (values and values[0] not in {str(value) for value in DPI_LEVELS}):
+            return jsonify(error="وضوح پردازش باید یکی از مقادیر ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ یا ۲۰۰۰ DPI باشد."), 400
+        dpi = int(values[0]) if values else DEFAULT_DPI
         job_id = uuid.uuid4().hex
         documents = {}
         pages = 0
@@ -962,14 +1063,14 @@ def upload():
         with LOCK:
             PENDING_OWNERS.discard(owner)
             JOBS[job_id] = {
-                "owner_id": owner, "documents": documents,
+                "owner_id": owner, "documents": documents, "dpi": dpi,
                 "state": "running", "log": [], "pages_total": 0, "pages_done": 0,
                 "failed_pages": 0, "review_pages": 0, "files": [], "zip": None, "file_index": 0,
                 "file_count": len(saved), "started": datetime.now().isoformat(timespec="seconds"),
             }
-        threading.Thread(target=_run_job, args=(job_id, saved, 2000), daemon=True).start()
+        threading.Thread(target=_run_job, args=(job_id, saved, dpi), daemon=True).start()
         started = True
-        return jsonify(job_id=job_id, count=len(saved))
+        return jsonify(job_id=job_id, count=len(saved), dpi=dpi)
     finally:
         if not started:
             QUEUE_SLOTS.release()

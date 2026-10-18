@@ -29,7 +29,7 @@ from . import tables as T
 from .metrics import Metrics
 
 CONF_REVIEW = 0.75   # بخش ۲۷: زیر این اطمینان → needs_review
-WORK_SCALE = 0.25    # تصویر کار برای تحلیل/برش ناحیه‌ها (0.25×2000DPI ≈ 500DPI)
+WORK_DPI = 500      # تحلیل تا ۵۰۰ DPI؛ مسترهای کم‌وضوح دوباره کوچک نمی‌شوند.
 
 
 def validate_text(raw: str) -> dict:
@@ -55,7 +55,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     if img is None:
         raise RuntimeError(f"master image unreadable: {master.path}")
     H, W = img.shape[:2]
-    ws = WORK_SCALE
+    ws = min(1.0, WORK_DPI / master.effective_dpi)
+    reference_scale = 2000.0 / master.effective_dpi
     raw_img = img  # مستر خام — برای گذرهای مخصوص (مثل گلیف عددی در صفحات تمیز)
     with m.step("working_image"):
         proc_small = cv2.resize(img, None, fx=ws, fy=ws, interpolation=cv2.INTER_AREA)
@@ -110,7 +111,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             with m.step("table_ocr"):
                 tmodel = _ocr_table(region, proc, engine_list, m,
                                     len(tables_out) + 1, (H, W),
-                                    raw_img if clean_page else None)
+                                    raw_img if clean_page else None,
+                                    dpi=master.effective_dpi)
             if tmodel:
                 tables_out.append(tmodel)
                 table_files.extend(T.write_table_outputs(
@@ -127,7 +129,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             # پنجرهٔ طلایی ارقام ~33–37px (0.13–0.16 در مستر ۲۰۰۰DPI — تأیید تجربی)
             f0 = P.optimal_ocr_scale(crop)
             if max(crop.shape[:2]) > 4500:
-                ladder = [f0, 0.16, 0.13, 0.10]
+                ladder = [f0, *(min(2.0, fac * reference_scale) for fac in (0.16, 0.13, 0.10))]
             else:
                 ladder = [f0, round(f0 * 0.5, 3)]
             candidates = []
@@ -182,7 +184,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                     and (E.needs_latin_repair(res["words"])
                          or E.region_has_latin_context(res["words"])):
                 # مقیاس گذر eng: هدف ~35px گلیف (ارقام لاتین بزرگ‌تر از فارسی‌اند)
-                f_eng = max(0.10, min(0.35, P.optimal_ocr_scale(crop,
+                f_eng = max(0.10, min(0.35 * reference_scale, P.optimal_ocr_scale(crop,
                                                                 target_h=35.0)))
                 ok2, buf2 = cv2.imencode(
                     ".png", P.pad_white(P.resize_by_factor(crop, f_eng)))
@@ -229,7 +231,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     # ── ساختار سطری متن صفحه از کلمات (بخش ۵ و ۲۱) ──
     words_all = E.merge_word_lists([words_all])
     with m.step("numeric_verification"):
-        _verify_text_numbers(words_all, proc, engine_list, m)
+        _verify_text_numbers(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     for w in words_all:
         conf = w.get("confidence")
         if conf is not None and conf < CONF_REVIEW:
@@ -317,7 +319,7 @@ def _ink_tight_crop(crop: np.ndarray, margin: int = 14) -> np.ndarray:
 
 
 def _cell_ocr_best(engine_list: list[E.OCREngine], crop: np.ndarray,
-                   m: Metrics, kind: str = "table_cell") -> dict:
+                   m: Metrics, kind: str = "table_cell", dpi: int = 2000) -> dict:
     """OCR چندمقیاسی سلول + رأی‌گیری سازگاری (بخش ۱۴ — انتخاب با consistency).
 
     متن درست بین مقیاس‌های مختلف تکرار می‌شود؛ آشغالِ مقیاس‌محور تصادفی است.
@@ -328,7 +330,7 @@ def _cell_ocr_best(engine_list: list[E.OCREngine], crop: np.ndarray,
     # نامزدهای مقیاس — سلول‌های بزرگ مستر در ~0.05–0.2 و سلول‌های کوچک بالاتر
     if max(crop.shape[:2]) > 1200:
         # 0.22 از رأی‌گیری مقیاس‌های متن سلول جلو می‌زند (تأیید تجربی روی bench_table)
-        cands = [0.22, 0.10, 0.17]
+        cands = [round(min(2.0, fac * 2000.0 / dpi), 3) for fac in (0.22, 0.10, 0.17)]
     else:
         cands = [f, round(f * 0.6, 3), round(f * 0.36, 3)]
     images = []
@@ -381,7 +383,7 @@ def _norm_digits(s: str) -> str:
 
 
 def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
-                     m: Metrics) -> dict:
+                     m: Metrics, dpi: int = 2000) -> dict:
     """گذر عددی گلیف‌به‌گلیف (بخش ۲۸ — دقت عدد حیاتی است).
 
     قواعد مبتنی بر شکل (استخراجی، نه حدسی — بخش ۲۹):
@@ -397,7 +399,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
     ccs = []
     for i in range(1, n):
         x, y, w, h, area = stats[i]
-        if area < 60:
+        if area < max(2, round(60 * min(1.0, dpi / 2000.0) ** 2)):
             continue
         # فقط قابِ کاملِ نازک (بقایای شبکه) حذف می‌شود — گلیفِ پرکنندهٔ برشِ
         # تنگ (h≈H) خودِ رقم است و نباید فیلتر شود
@@ -512,7 +514,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
 
 
 def _verify_text_numbers(words: list[dict], source: np.ndarray,
-                         engines: list[E.OCREngine], metrics: Metrics) -> None:
+                         engines: list[E.OCREngine], metrics: Metrics, dpi: int = 2000) -> None:
     """Verify confusable Persian numerals from isolated glyphs in the master.
 
     Keep the initial reading for audit, and flag any disagreement for review.
@@ -536,7 +538,7 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
             word["needs_review"] = True
             continue
         try:
-            result = _glyph_digit_ocr(engines, crop, metrics)
+            result = _glyph_digit_ocr(engines, crop, metrics, dpi=dpi)
         except (RuntimeError, OSError, ValueError):
             word["needs_review"] = True
             continue
@@ -554,7 +556,7 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
 
 def _ocr_table(region: L.Region, proc: np.ndarray,
                engine_list: list[E.OCREngine], m: Metrics, table_id: int,
-               img_shape: tuple, raw_img: np.ndarray | None = None) -> dict | None:
+               img_shape: tuple, raw_img: np.ndarray | None = None, dpi: int = 2000) -> dict | None:
     """OCR سلول‌به‌سلول جدول از مستر 2000DPI (بخش ۱۰)."""
     if not region.grid:
         return None
@@ -573,7 +575,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
             continue
         # بقایای خطوط شبکه پاک می‌شوند — وگرنه تحلیل چیدمان موتور می‌شکند (بخش ۱۰)
         crop = T.strip_grid_lines(crop_raw)
-        res = _cell_ocr_best(engine_list, crop, m)
+        res = _cell_ocr_best(engine_list, crop, m, dpi=dpi)
         engines_used.add(res.get("engine", "?"))
         if res.get("multipass"):
             m.inc("fallbacks")
@@ -590,7 +592,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
             crop_g = glyph_src[y0g:min(img_shape[0], y1g),
                                x0g:min(img_shape[1], x1g)]
             crop_g = T.strip_grid_lines(crop_g)  # خطوط شبکه در برش خام هستند
-            r2 = _glyph_digit_ocr(engine_list, crop_g, m)
+            r2 = _glyph_digit_ocr(engine_list, crop_g, m, dpi=dpi)
             t2 = r2.get("text", "")
             complete = re.fullmatch(r"[۰-۹0-9]{1,16}", t2)
             if not complete:

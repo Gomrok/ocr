@@ -59,6 +59,17 @@ class WebTests(unittest.TestCase):
         with self.client.get("/static/fonts/Vazir-Bold.woff2") as font:
             self.assertEqual(font.data[:4], b"wOF2")
 
+    def test_brand_palette_and_six_step_resolution_control(self):
+        self.assertIn("سامانه پردازش تصویری سامانه هوش مصنوعی گمرک", self.page.text)
+        self.assertIn("--gm-brand-navy: #102A43", self.page.text)
+        self.assertIn("--gm-brand-accent: #0F766E", self.page.text)
+        self.assertIn("--gm-action-primary: #1D4ED8", self.page.text)
+        self.assertRegex(self.page.text, r'id="dpiControl" type="range" min="0" max="5" step="1" value="5"')
+        self.assertIn('aria-describedby="qualityHint qualityScale"', self.page.text)
+        stops = re.findall(r'<span data-dpi="(\d+)">', self.page.text)
+        self.assertEqual(stops, ["100", "250", "500", "1000", "1500", "2000"])
+        self.assertLess(self.page.text.index('id="results"'), self.page.text.index('id="qualityHeading"'))
+
     def test_csp_and_secure_headers(self):
         nonce = re.search(r'<script nonce="([^"]+)"', self.page.text)[1]
         self.assertIn("'nonce-" + nonce + "'", self.page.headers["Content-Security-Policy"])
@@ -101,9 +112,47 @@ class WebTests(unittest.TestCase):
         self.assertEqual(list(self.uploads.iterdir()), [])
         self.assertEqual(web.PENDING_OWNERS, set())
 
-    def test_quality_cannot_be_overridden(self):
-        for dpi in ("999999", "-1", "invalid"):
-            self.assertEqual(self.upload(dpi=dpi).status_code, 400)
+    def test_all_six_dpi_levels_reach_the_worker_and_status(self):
+        for dpi in (100, 250, 500, 1000, 1500, 2000):
+            with self.subTest(dpi=dpi):
+                response = self.upload(dpi=str(dpi))
+                self.assertEqual(response.status_code, 200)
+                job_id = response.json["job_id"]
+                self.assertEqual(response.json["dpi"], dpi)
+                call = web.threading.Thread.call_args
+                self.assertEqual(call.kwargs["target"], web._run_job)
+                self.assertEqual(call.kwargs["args"][2], dpi)
+                self.assertEqual(self.client.get("/status/" + job_id).json["dpi"], dpi)
+                web.JOBS[job_id]["state"] = "done"
+                web.QUEUE_SLOTS.release()  # The mocked worker cannot release its slot.
+
+    def test_omitted_dpi_preserves_2000_default(self):
+        response = self.upload()
+        self.assertEqual(response.json["dpi"], 2000)
+        self.assertEqual(web.threading.Thread.call_args.kwargs["args"][2], 2000)
+
+    def test_invalid_and_duplicate_dpi_values_are_rejected_without_files(self):
+        for dpi in ("999999", "-1", "invalid", "0", "200", "300", "2000.0", "1e3", "",
+                    " 100", "۱۰۰", "0100", "NaN", ["100", "2000"], ["500", "500"]):
+            with self.subTest(dpi=dpi):
+                web.UPLOAD_TIMES.clear()
+                self.assertEqual(self.upload(dpi=dpi).status_code, 400)
+                self.assertEqual(list(self.uploads.iterdir()), [])
+                self.assertEqual(web.JOBS, {})
+                self.assertEqual(web.PENDING_OWNERS, set())
+        web.threading.Thread.assert_not_called()
+
+    def test_selected_dpi_is_forwarded_to_every_document_in_batch(self):
+        with patch.object(web, "process_pdf", return_value={
+                "document": {"pages": 1}, "performance": {"failed_pages": 0}}) as process:
+            response = self.upload(dpi="250")
+            job_id = response.json["job_id"]
+            paths = [self.uploads / f"{job_id}_001.pdf", self.uploads / f"{job_id}_002.pdf"]
+            web.JOBS[job_id]["documents"][paths[1].name] = "دوم.pdf"
+            with patch.object(web, "_collect_outputs", return_value=[]):
+                web._process_job(job_id, paths, 250)
+        self.assertEqual(process.call_count, 2)
+        self.assertTrue(all(call.kwargs["dpi"] == 250 for call in process.call_args_list))
 
     def test_100_pdf_batch_contract(self):
         content = pdf_bytes()
