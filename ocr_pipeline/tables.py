@@ -70,6 +70,21 @@ def strip_grid_lines(crop: np.ndarray) -> np.ndarray:
         k += 1
     if k:
         out[:, max(0, w - k - 2):] = 255
+    # A skewed/faded grid may start several pixels inside the crop, or occupy
+    # only part of an edge row. It still must not determine the OCR ink height.
+    # Use a lighter mask to find long rule fragments, only within the outer 5%.
+    # The mask removes strokes, not entire edge bands or the original document.
+    threshold = min(245, max(0, int(np.percentile(crop, 90)) - 10))
+    rules = cv2.threshold(crop, threshold, 255, cv2.THRESH_BINARY_INV)[1]
+    horizontal = cv2.morphologyEx(rules, cv2.MORPH_OPEN,
+                                  np.ones((1, max(8, w // 4)), np.uint8))
+    vertical = cv2.morphologyEx(rules, cv2.MORPH_OPEN,
+                                np.ones((max(8, h // 4), 1), np.uint8))
+    my, mx = max(3, h // 20), max(3, w // 20)
+    horizontal[my:h - my] = 0
+    vertical[:, mx:w - mx] = 0
+    mask = cv2.dilate(horizontal | vertical, np.ones((3, 3), np.uint8))
+    out[mask > 0] = 255
     return out
 
 
@@ -165,9 +180,10 @@ def to_xlsx(table: dict, path: Path) -> None:
     wb.save(path)
 
 
-def write_table_outputs(table: dict, out_dir: Path) -> list[str]:
+def write_table_outputs(table: dict, out_dir: Path, *, page_no: int | None = None) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    tid = f"table_{table['table_id']:03d}"
+    prefix = f'page_{page_no:03d}_' if page_no is not None else ''
+    tid = f"{prefix}table_{table['table_id']:03d}"
     paths = []
     p = out_dir / f"{tid}.json"
     p.write_text(_json.dumps(table, ensure_ascii=False, indent=2), "utf-8")

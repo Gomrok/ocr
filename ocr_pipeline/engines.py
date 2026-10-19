@@ -133,12 +133,19 @@ class _HocrWords(HTMLParser):
         self.current = None
         self.depth = 0
         self.parts = []
+        self.line = None
+        self.line_depth = 0
 
     def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if self.line is not None:
+            self.line_depth += 1
+        elif set((values.get('class') or '').split()) & {'ocr_line', 'ocr_caption', 'ocr_header'}:
+            self.line = values.get('id')
+            self.line_depth = 1
         if self.current is not None:
             self.depth += 1
             return
-        values = dict(attrs)
         if 'ocrx_word' not in (values.get('class') or '').split():
             return
         title = values.get('title') or ''
@@ -147,6 +154,8 @@ class _HocrWords(HTMLParser):
         if bbox:
             self.current = {'bbox': tuple(map(int, bbox.groups())),
                             'confidence': float(conf[1]) / 100 if conf else None}
+            if self.line:
+                self.current['line_id'] = self.line
             self.depth = 1
             self.parts = []
 
@@ -155,6 +164,10 @@ class _HocrWords(HTMLParser):
             self.parts.append(data)
 
     def handle_endtag(self, tag):
+        if self.line is not None:
+            self.line_depth -= 1
+            if self.line_depth == 0:
+                self.line = None
         if self.current is None:
             return
         self.depth -= 1
@@ -314,9 +327,40 @@ def words_to_lines(words: list[dict], y_tol: float = 0.6) -> list[str]:
     def h_of(w): return max(1, w["bbox"][3] - w["bbox"][1])
     med_h = sorted(h_of(w) for w in words)[len(words) // 2]
     tol = med_h * y_tol
+    # Preserve the engine's actual line segmentation. A global median-height
+    # tolerance mixes adjacent lines in skewed, tightly typeset newspaper text.
+    named: dict[str, list[dict]] = {}
+    unassigned = []
+    for word in words:
+        if word.get('line_id'):
+            named.setdefault(word['line_id'], []).append(word)
+        else:
+            unassigned.append(word)
     clusters: list[list[dict]] = []
-    sums: list[float] = []
-    for w in sorted(words, key=yc):
+    def extent(line):
+        return (min(w['bbox'][0] for w in line), min(w['bbox'][1] for w in line),
+                max(w['bbox'][2] for w in line), max(w['bbox'][3] for w in line))
+
+    # Separate crops (or sparse-text passes) can describe adjacent pieces of
+    # one baseline. Join only nearly disjoint, vertically aligned pieces,
+    # never overlapping lines merely because their word centres are close.
+    for line in sorted(named.values(), key=lambda line: extent(line)[1]):
+        a = extent(line)
+        for cluster in clusters:
+            b = extent(cluster)
+            height = max(1, min(a[3] - a[1], b[3] - b[1]))
+            overlap_x = min(a[2], b[2]) - max(a[0], b[0])
+            overlap_y = min(a[3], b[3]) - max(a[1], b[1])
+            if (overlap_x <= .05 * min(a[2] - a[0], b[2] - b[0])
+                    and -overlap_x <= 3 * height
+                    and overlap_y >= .4 * height
+                    and abs((a[1] + a[3]) - (b[1] + b[3])) <= 1.2 * height):
+                cluster.extend(line)
+                break
+        else:
+            clusters.append(list(line))
+    sums: list[float] = [sum(map(yc, line)) for line in clusters]
+    for w in sorted(unassigned, key=yc):
         for i, ln in enumerate(clusters):
             if abs(yc(w) - sums[i] / len(ln)) <= tol:
                 ln.append(w)
@@ -450,6 +494,8 @@ def merge_latin_secondary(fas_words: list[dict],
                     and _valid_latin_read(eng_left[best_j]["text"]):
                 nw = dict(eng_left[best_j])
                 nw["bbox"] = w["bbox"]
+                if w.get('line_id'):
+                    nw['line_id'] = w['line_id']
                 nw['raw_ocr_text'] = w.get('raw_ocr_text', raw)
                 nw['recognition_repaired'] = True
                 nw["engine"] = "tesseract+eng"
@@ -486,6 +532,8 @@ def merge_latin_secondary(fas_words: list[dict],
             # خوانش eng (هرچند بااطمینان) تعویض نمی‌شود (بخش ۲۹)
             if _replaceable_token(w.get("text", "")):
                 ne = dict(e)
+                if w.get('line_id'):
+                    ne['line_id'] = w['line_id']
                 ne['raw_ocr_text'] = w.get('raw_ocr_text', w['text'])
                 ne['recognition_repaired'] = True
                 ne["engine"] = "tesseract+eng"
@@ -726,9 +774,9 @@ class TesseractEngine(OCREngine):
 
     # PSM بر اساس نوع ناحیه (بخش ۱۶) + PSMهای بازیابی
     PSM_FOR = {"text": 3, "table_cell": 12, "numeric": 7, "glyph": 10,
-               "table": 11, "sparse": 11, "line": 7}
+               "table": 11, "sparse": 11, "line": 7, "raw_line": 13}
     RETRY_PSM = {"text": (11, 6), "table_cell": (3, 6), "numeric": (12, 6),
-                 "glyph": (7, 6)}
+                 "glyph": (7, 6), "raw_line": ()}
 
 
 def pick_engine(engines: list[OCREngine]) -> OCREngine:

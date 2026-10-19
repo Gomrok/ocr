@@ -2,6 +2,7 @@ import unittest
 import csv
 import io
 import sys
+import tempfile
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch, Mock
@@ -9,7 +10,7 @@ from unittest.mock import patch, Mock
 import cv2
 import numpy as np
 
-from ocr_pipeline import engines as E, pipeline as P, tables as T
+from ocr_pipeline import engines as E, pipeline as P, tables as T, preprocess as PRE
 from ocr_pipeline.metrics import Metrics
 
 
@@ -35,6 +36,133 @@ class AccuracyTests(unittest.TestCase):
         self.assertEqual([w['text'] for w in words], ['A&B', '۱۲۳', '<script>'])
         self.assertEqual(words[0]['confidence'], 0.0)
         self.assertAlmostEqual(E.result_confidence({'words': words}), .64)
+
+    def test_hocr_preserves_line_membership_with_nested_markup(self):
+        words = E.TesseractEngine._parse_hocr('''<div>
+            <span class="ocr_line" id="line_1"><span class="ocrx_word"
+              title="bbox 10 10 20 20; x_wconf 90"><strong>یک</strong></span></span>
+            <span class="ocr_line" id="line_2"><span class="ocrx_word"
+              title="bbox 10 24 20 34; x_wconf 90">دو</span></span>
+            <span class="ocrx_word" title="bbox 10 40 20 50; x_wconf 90">سه</span>
+            </div>''')
+        self.assertEqual([w.get('line_id') for w in words], ['line_1', 'line_2', None])
+
+    def test_skewed_dense_lines_are_not_mixed_by_word_centres(self):
+        words = [
+            {'text':'اول', 'bbox':(140,10,190,30), 'line_id':'a'},
+            {'text':'پایان', 'bbox':(10,23,70,43), 'line_id':'a'},
+            {'text':'دوم', 'bbox':(140,33,190,53), 'line_id':'b'},
+            {'text':'تمام', 'bbox':(10,46,70,66), 'line_id':'b'},
+        ]
+        self.assertEqual(E.words_to_lines(words), ['اول پایان', 'دوم تمام'])
+
+    def test_adjacent_same_baseline_crops_rejoin_in_rtl_order(self):
+        words = [
+            {'text':'کالا', 'bbox':(10,12,60,30), 'line_id':'2:a'},
+            {'text':'گزارش', 'bbox':(70,10,130,30), 'line_id':'1:a'},
+        ]
+        self.assertEqual(E.words_to_lines(words), ['گزارش کالا'])
+
+    def test_line_fragments_tolerate_small_bbox_overlap_not_distant_columns(self):
+        words = [
+            {'text': 'کالا', 'bbox': (10, 20, 130, 40), 'line_id': '2:a'},
+            {'text': 'گزارش', 'bbox': (128, 10, 240, 30), 'line_id': '1:a'},
+        ]
+        self.assertEqual(E.words_to_lines(words), ['گزارش کالا'])
+        words[1]['bbox'] = (260, 20, 380, 40)
+        self.assertEqual(len(E.words_to_lines(words)), 2)
+
+    def test_table_files_from_different_pages_cannot_overwrite_each_other(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = T.build_table_model(1, ((0,50),(0,100)), {(0,0):'اول'}, {}, 'test')
+            second = T.build_table_model(1, ((0,50),(0,100)), {(0,0):'دوم'}, {}, 'test')
+            with patch.object(T, 'to_xlsx', side_effect=ImportError('optional export unavailable')):
+                a = T.write_table_outputs(first, Path(directory), page_no=1)
+                b = T.write_table_outputs(second, Path(directory), page_no=2)
+            self.assertFalse(set(a) & set(b))
+            self.assertIn('اول', (Path(directory)/'page_001_table_001.csv').read_text('utf-8'))
+            self.assertIn('دوم', (Path(directory)/'page_002_table_001.csv').read_text('utf-8'))
+
+    def test_faded_inset_grid_is_removed_without_erasing_cell_ink(self):
+        image = np.full((500,600), 240, np.uint8)
+        cv2.rectangle(image,(5,5),(592,493),190,2)
+        cv2.putText(image,'TEXT',(90,210),cv2.FONT_HERSHEY_SIMPLEX,2,0,4)
+        original=image.copy()
+        actual=T.strip_grid_lines(image)
+        self.assertTrue((actual[:12][original[:12] < 230] == 255).all())
+        np.testing.assert_array_equal(actual[150:220,85:300], original[150:220,85:300])
+        np.testing.assert_array_equal(image, original)
+
+    def test_cell_line_bands_preserve_detached_dots_and_separate_rows(self):
+        image = np.full((300,400),255,np.uint8)
+        cv2.rectangle(image,(50,60),(150,110),0,-1)
+        cv2.rectangle(image,(70,40),(80,48),0,-1)
+        self.assertEqual(PRE.cell_line_bands(image), [(0,300)])
+        cv2.rectangle(image,(50,210),(150,260),0,-1)
+        bands=PRE.cell_line_bands(image)
+        self.assertEqual(len(bands),2)
+        self.assertGreater(bands[0][1],110)
+        self.assertLess(bands[0][1],210)
+
+    def test_cell_line_analysis_handles_empty_and_extremely_narrow_images(self):
+        self.assertEqual(PRE.cell_line_bands(np.zeros((0, 2), np.uint8)), [(0, 0)])
+        for shape in ((120000, 1), (1, 120000)):
+            self.assertEqual(PRE.cell_line_bands(np.zeros(shape, np.uint8)), [(0, shape[0])])
+
+    def test_numeric_cell_recovery_requires_fully_confirmed_alternative(self):
+        from ocr_pipeline.layout import Region
+        image = np.zeros((100, 100), np.uint8)
+        metrics = Metrics()
+        initial = '۱۳۳/۵۶'
+        recovered = '۱۲۳,۴۵۶'
+        try:
+            for certain in (True, False):
+                with self.subTest(certain=certain), \
+                        patch.object(P, '_cell_ocr_best', return_value={'text': initial, 'confidence': .4}), \
+                        patch.object(P, '_glyph_digit_ocr', side_effect=[
+                            {'text': '', 'needs_review': True},
+                            {'text': recovered, 'needs_review': not certain}]) as glyph:
+                    table = P._ocr_table(Region('table', (0, 0, 100, 100), ((0, 100), (0, 100))),
+                                         image, [], metrics, 1, image.shape)
+                cell = table['cells'][0]
+                self.assertEqual(cell['normalized_text'], recovered if certain else initial)
+                self.assertEqual(cell['raw_ocr_text'], initial)
+                self.assertTrue(cell['needs_review'])
+                self.assertEqual(glyph.call_count, 2)
+                self.assertNotIn('expected_text', glyph.call_args.kwargs)
+        finally:
+            metrics.stop()
+
+    def test_low_confidence_cells_are_flagged_even_without_vote_disagreement(self):
+        from ocr_pipeline.layout import Region
+        image=np.zeros((100,100),np.uint8)
+        metrics=Metrics()
+        try:
+            with patch.object(P,'_cell_ocr_best',return_value={'text':'نمونه','confidence':.4}):
+                table=P._ocr_table(Region('table',(0,0,100,100),((0,100),(0,100))),
+                                   image,[],metrics,1,image.shape)
+            self.assertTrue(table['cells'][0]['needs_review'])
+        finally:
+            metrics.stop()
+
+    def test_raw_cell_recovery_requires_two_matching_readings(self):
+        image=np.full((400,800),255,np.uint8)
+        cv2.putText(image,'TEST',(30,260),cv2.FONT_HERSHEY_SIMPLEX,5,0,5)
+        initial={'text':'ناقص','confidence':.3}
+        good={'text':'آزمایش','confidence':.7}
+        metrics=Metrics()
+        try:
+            for secondary, expected in [([good,good],'آزمایش'),
+                    ([good,{'text':'متفاوت','confidence':.8}],'ناقص'),
+                    ([good,{'text':'آزمایش','confidence':.2}],'ناقص')]:
+                with patch.object(E,'ocr_many',side_effect=[[initial]*3,secondary]):
+                    result=P._cell_ocr_best([],image,metrics,split_lines=False)
+                self.assertEqual(result['text'],expected)
+                if expected=='آزمایش':
+                    self.assertEqual(result['raw_ocr_text'],'ناقص')
+                    self.assertTrue(result['needs_review'])
+        finally:
+            metrics.stop()
 
     def test_exports_do_not_execute_ocr_markup_or_spreadsheet_formulas(self):
         values = ['=1+1', '\t@SUM(A1)', '<script>alert(1)</script>', '-123']

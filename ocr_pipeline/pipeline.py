@@ -106,7 +106,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         x0, y0, x1, y1 = bbox
         return proc[max(0, y0):min(H, y1), max(0, x0):min(W, x1)]
 
-    for region in regions:
+    for region_index, region in enumerate(regions):
         if region.kind == "table":
             with m.step("table_ocr"):
                 tmodel = _ocr_table(region, proc, engine_list, m,
@@ -116,7 +116,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             if tmodel:
                 tables_out.append(tmodel)
                 table_files.extend(T.write_table_outputs(
-                    tmodel, master.path.parent.parent / "tables"))
+                    tmodel, master.path.parent.parent / "tables", page_no=page_no))
             continue  # متن جدول از سلول‌ها بازسازی می‌شود (بخش ۱۰)
 
         with m.step("ocr"):
@@ -146,6 +146,11 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             if not results:
                 continue
             res = E.select_consensus(results)
+            # HOCR identifiers restart on every subprocess. Namespace them by
+            # region and recognition pass before merging words across crops.
+            for word in res.get('words') or []:
+                if word.get('line_id'):
+                    word['line_id'] = f'{region_index}:primary:{word["line_id"]}'
             f = res["_scale"]
             region_raw_text = res.get('text', '')
             page_engines.add(res.get("engine", "?"))
@@ -174,6 +179,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                         k = f / f_eng  # کادر eng → قاب مختصات گذر fas
                         ew = []
                         for x in r_eng.get("words") or []:
+                            if x.get('line_id'):
+                                x['line_id'] = f'{region_index}:english:{x["line_id"]}'
                             bx = x["bbox"]
                             x["bbox"] = tuple(int((v - 30) * k) + 30 for v in bx)
                             ew.append(x)
@@ -250,6 +257,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "words": [{"text": E.display_text(w["text"]), "bbox": list(w["bbox"]),
                    "confidence": w.get("confidence"),
                    "raw_ocr_text": w.get("raw_ocr_text", w["text"]),
+                   **({'line_id': w['line_id']} if w.get('line_id') else {}),
                    **({"numeric_verified": True} if w.get("numeric_verified") else {}),
                    **({"recognition_repaired": True} if w.get("recognition_repaired") else {}),
                    **({"needs_review": True} if w.get("needs_review") else {})}
@@ -301,13 +309,27 @@ def _ink_tight_crop(crop: np.ndarray, margin: int = 14) -> np.ndarray:
 
 
 def _cell_ocr_best(engine_list: list[E.OCREngine], crop: np.ndarray,
-                   m: Metrics, kind: str = "table_cell", dpi: int = 2000) -> dict:
+                   m: Metrics, kind: str = "table_cell", dpi: int = 2000,
+                   split_lines: bool = True) -> dict:
     """OCR چندمقیاسی سلول + رأی‌گیری سازگاری (بخش ۱۴ — انتخاب با consistency).
 
     متن درست بین مقیاس‌های مختلف تکرار می‌شود؛ آشغالِ مقیاس‌محور تصادفی است.
     اکثریتِ متن‌های غیرخالی برنده است؛ در نبود اکثریت، بالاترین اطمینان.
     """
     crop = _ink_tight_crop(crop)
+    if split_lines:
+        bands = P.cell_line_bands(crop)
+        if len(bands) > 1:
+            lines = [_cell_ocr_best(engine_list, crop[y0:y1], m, kind, dpi,
+                                   split_lines=False) for y0, y1 in bands]
+            if all(r.get('text', '').strip() and E.result_confidence(r) >= .55 for r in lines):
+                return {'text': '\n'.join(r['text'].strip() for r in lines),
+                        'words': [w for r in lines for w in r.get('words', [])],
+                        'confidence': sum(E.result_confidence(r) for r in lines) / len(lines),
+                        'engine': ','.join(sorted({r.get('engine', 'tesseract') for r in lines})),
+                        'raw_ocr_text': '\n'.join(r.get('raw_ocr_text', r['text']).strip() for r in lines),
+                        'needs_review': any(r.get('needs_review') or E.result_confidence(r) < CONF_REVIEW
+                                            for r in lines)}
     f = P.optimal_ocr_scale(crop)
     # نامزدهای مقیاس — سلول‌های بزرگ مستر در ~0.05–0.2 و سلول‌های کوچک بالاتر
     if max(crop.shape[:2]) > 1200:
@@ -327,7 +349,28 @@ def _cell_ocr_best(engine_list: list[E.OCREngine], crop: np.ndarray,
     if not results:
         return {"text": "", "words": [], "confidence": None, "engine": "none"}
 
-    return E.select_consensus(results)
+    best = E.select_consensus(results)
+    if E.result_confidence(best) < .80 and len(P.cell_line_bands(crop)) == 1:
+        ink_height = max(1, _ink_tight_crop(crop, margin=0).shape[0])
+        raw_images = []
+        for target in (128, 160):
+            fac = min(2.0, target / ink_height, 3500 / max(crop.shape))
+            if any(round(size * fac) < 1 for size in crop.shape):
+                continue
+            ok, buf = cv2.imencode('.png', P.pad_white(P.resize_by_factor(crop, fac)))
+            if ok and buf.tobytes() not in raw_images:
+                raw_images.append(buf.tobytes())
+        if len(raw_images) == 2:
+            m.inc('ocr_calls', 2)
+            reads = E.ocr_many(engine_list, raw_images, region_kind='raw_line')
+            if all(r and E.result_confidence(r) >= .55 for r in reads):
+                raw = E.select_consensus(reads)
+                if (raw.get('votes') == 2
+                        and E.result_confidence(raw) >= E.result_confidence(best) + .10):
+                    raw['raw_ocr_text'] = best.get('text', '')
+                    raw['needs_review'] = True
+                    return raw
+    return best
 
 
 def _confirmed_crop_read(engine_list: list[E.OCREngine], crop: np.ndarray,
@@ -668,7 +711,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
             m.inc("fallbacks")
         m.inc("fallbacks", int(res.get("extra_passes", 0)))
         txt = res.get("text", "").strip().replace("\n", " ")
-        original_readings[(r, c)] = txt
+        original_readings[(r, c)] = res.get('raw_ocr_text', txt)
         conf = res.get("confidence")
         # English numerals need the English model; Persian-only recognition can
         # drop a decimal point or read 500 as 00. Require matching full readings.
@@ -696,6 +739,13 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
             separators = any(not char.isdigit() for char in txt)
             r2 = _glyph_digit_ocr(engine_list, crop_g, m, dpi=dpi,
                                   **({'expected_text': txt} if separators else {}))
+            if separators and not r2.get('text') and (conf or 0) < CONF_REVIEW:
+                # The first read may have merged a digit with a comma. A
+                # count mismatch cannot be verified against that broken layout;
+                # allow only a fully agreed, image-segmented replacement below.
+                recovered = _glyph_digit_ocr(engine_list, crop_g, m, dpi=dpi)
+                if not recovered.get('needs_review'):
+                    r2 = recovered
             t2 = r2.get("text", "")
             complete = re.fullmatch(r"[۰-۹0-9][۰-۹0-9,٬٫./-]{0,23}", t2)
             if complete and r2.get('needs_review') and len(t2) == len(txt):
@@ -713,6 +763,8 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
                 txt = t2
                 conf = None
                 res["needs_review"] = True  # بخش ۲۷: عدم توافق پنهان نمی‌شود
+        if conf is not None and conf < CONF_REVIEW:
+            res['needs_review'] = True
         if res.get("needs_review"):
             m.low_conf_regions += 1
         cell_texts[(r, c)] = txt

@@ -184,6 +184,41 @@ def resize_by_factor(crop: np.ndarray, f: float) -> np.ndarray:
     return cv2.resize(crop, None, fx=f, fy=f, interpolation=interp)
 
 
+def cell_line_bands(crop: np.ndarray) -> list[tuple[int, int]]:
+    """Locate clearly separated cell lines without splitting detached dots.
+
+    The scale follows substantial ink components, not a fixed DPI. Work on a
+    bounded mask and return coordinates in the untouched source cell.
+    """
+    h, w = crop.shape[:2]
+    if not crop.size:
+        return [(0, h)]
+    factor = min(1.0, 1600 / max(h, w))
+    small = cv2.resize(crop, (max(1, round(w * factor)), max(1, round(h * factor))),
+                       interpolation=cv2.INTER_AREA) if factor < 1 else crop
+    bw = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(bw)
+    keep = np.zeros(count, dtype=bool)
+    heights = []
+    for i in range(1, count):
+        _, _, cw, ch, area = map(int, stats[i])
+        if area < 3 or cw > ch * 25 or ch > cw * 25:
+            continue
+        keep[i] = True
+        heights.append(ch)
+    if not heights:
+        return [(0, h)]
+    occupied = np.flatnonzero(keep[labels].sum(axis=1) >= max(2, round(small.shape[1] * .003)))
+    if not len(occupied):
+        return [(0, h)]
+    gap = max(4, round(max(heights) * .4))
+    cuts = [round((a + b) / (2 * factor)) for a, b in zip(occupied, occupied[1:]) if b - a > gap]
+    if not 1 <= len(cuts) <= 5:
+        return [(0, h)]
+    edges = [0, *cuts, h]
+    return list(zip(edges, edges[1:]))
+
+
 def preprocess_master(img: np.ndarray, variants: bool = False) -> dict:
     """پیش‌پردازش تحلیل‌محور مستر — برمی‌گرداند dict نسخه‌ها.
 
