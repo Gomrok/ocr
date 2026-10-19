@@ -217,6 +217,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     with m.step('recognition_repair'):
         _repair_suspicious_words(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     with m.step("numeric_verification"):
+        _recover_header_numbers(words_all, proc, engine_list, m, dpi=master.effective_dpi)
         _verify_text_numbers(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     for w in words_all:
         conf = w.get("confidence")
@@ -439,9 +440,10 @@ def _repair_suspicious_words(words: list[dict], source: np.ndarray,
         word['confidence'] = repair.get('confidence')
         word['recognition_repaired'] = True
 
-
 FA_DIGIT_CHARS = "۰۱۲۳۴۵۶۷۸۹"
 EN_DIGIT_CHARS = "0123456789"
+AR_DIGIT_CHARS = "٠١٢٣٤٥٦٧٨٩"
+DIGIT_WHITELIST = FA_DIGIT_CHARS + AR_DIGIT_CHARS + EN_DIGIT_CHARS
 
 
 def _norm_digits(s: str) -> str:
@@ -450,8 +452,72 @@ def _norm_digits(s: str) -> str:
                                      EN_DIGIT_CHARS * 2))
 
 
+def _script_digit_read(engine_list: list[E.OCREngine], glyph: np.ndarray,
+                       metrics: Metrics) -> str | None:
+    """Read alternate Arabic-script numeral shapes, never language-correct them."""
+    local = next((engine for engine in engine_list if isinstance(engine, E.TesseractEngine)
+                  and (engine.tessdata_dir / 'Arabic.traineddata').is_file()), None)
+    if local is None:
+        return None
+    crop = _ink_tight_crop(glyph, margin=0)
+    images = []
+    for target in (60, 100):
+        factor = min(2.0, target / max(1, crop.shape[0]), 3500 / max(crop.shape))
+        if any(round(size * factor) < 1 for size in crop.shape):
+            return None
+        ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(crop, factor)))
+        if ok:
+            images.append(encoded.tobytes())
+    if len(images) != 2 or images[0] == images[1]:
+        return None
+    metrics.inc('ocr_calls', 2)
+    readings = E.ocr_many([local], images, region_kind='raw_line',
+                          whitelist=DIGIT_WHITELIST, langs_override='Arabic')
+    def agreed_digit(results):
+        eligible = [reading for reading in results if reading
+                    and E.result_confidence(reading) >= .50
+                    and re.fullmatch('[0-9]', _norm_digits(reading.get('text', '').strip()))]
+        digits = [_norm_digits(reading['text'].strip()) for reading in eligible]
+        if (len(digits) >= 2 and len(set(digits)) == 1
+                and max(map(E.result_confidence, eligible)) >= .70):
+            return digits[0]
+        return None
+
+    digit = agreed_digit(readings)
+    if digit is not None:
+        return digit
+    images = []
+    for target in (44, 80):
+        factor = min(2.0, target / max(1, crop.shape[0]), 3500 / max(crop.shape))
+        if any(round(size * factor) < 1 for size in crop.shape):
+            return None
+        ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(crop, factor)))
+        if ok:
+            images.append(encoded.tobytes())
+    if len(images) == 2 and images[0] != images[1]:
+        metrics.inc('ocr_calls', 2)
+        readings += E.ocr_many([local], images, region_kind='line',
+                               whitelist=DIGIT_WHITELIST, langs_override='Arabic')
+        return agreed_digit(readings)
+    return None
+
+
+def _is_slash(ink: np.ndarray) -> bool:
+    """A narrow, straight rising stroke; unlike the descending Persian one."""
+    height, width = ink.shape
+    if height < 6 or not .15 <= width / height <= .85:
+        return False
+    ys, xs = np.where(ink > 0)
+    if len(ys) < 8 or np.ptp(ys) < 5:
+        return False
+    slope, offset = np.polyfit(ys, xs, 1)
+    residual = np.sqrt(np.mean((xs - (slope * ys + offset)) ** 2))
+    return -.85 <= slope <= -.15 and residual < .065 * height
+
+
 def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
-                     m: Metrics, dpi: int = 2000, expected_text: str | None = None) -> dict:
+                     m: Metrics, dpi: int = 2000, expected_text: str | None = None,
+                     detect_separators: bool = False) -> dict:
     """گذر عددی گلیف‌به‌گلیف (بخش ۲۸ — دقت عدد حیاتی است).
 
     قواعد مبتنی بر شکل (استخراجی، نه حدسی — بخش ۲۹):
@@ -478,6 +544,10 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         return {"text": ""}
     # ارتفاع مرجع فقط از گلیف‌های بزرگ (خود ارقام) — دایره‌ها/نقطه‌ها میانه را خراب می‌کنند
     hmax = max(c[3] for c in ccs)
+    if detect_separators:
+        # Field recovery accepts slash-separated identifiers only. Tiny edge
+        # specks are not digits; decimal/thousand punctuation uses the old path.
+        ccs = [c for c in ccs if c[3] >= .15 * hmax]
     big_h = sorted(c[3] for c in ccs if c[3] >= 0.35 * hmax)
     med_h = big_h[len(big_h) // 2]
     # نقطه‌ها/نشانه‌های ریز به گلیف پایهٔ هم‌ستون وصل می‌شوند
@@ -515,6 +585,9 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         if expected_text is not None and not expected_text[glyph_index].isdigit():
             glyphs.append((expected_text[glyph_index], []))
             continue
+        if detect_separators and h >= .65 * med_h and _is_slash(bw[y:y+h, x:x+w]):
+            glyphs.append(('/', []))
+            continue
         if (expected_text is None and h < 0.65 * med_h and w < h
                 and y + h > baseline + 0.15 * med_h):
             # A comma descends below the digit baseline; Persian zero does not.
@@ -523,7 +596,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             continue
         # قانون شکل صفر فارسی: دایرهٔ کوچکِ در نیمهٔ پایینیِ نوار ارقام
         if (h < 0.60 * hmax and 0.65 * h <= w <= 1.8 * h
-                and y + h >= baseline - 0.25 * hmax
+                and y + h >= baseline - (0.55 if detect_separators else 0.25) * hmax
                 and y + h <= baseline + 0.15 * hmax):
             glyphs.append((None, []))
             continue
@@ -550,7 +623,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         glyphs.append((g, indices))
     m.inc("ocr_calls", len(images))
     readings = E.ocr_many(engine_list, images, region_kind="glyph",
-                          whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)
+                          whitelist=DIGIT_WHITELIST)
     for g, indices in glyphs:
         if isinstance(g, str):
             confirmed_positions.append(len(out))
@@ -564,7 +637,8 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         for index in indices:
             res = readings[index] or {}
             ch = (res.get("text") or "").strip().replace("\n", " ")
-            if len(ch) == 1 and ch in (FA_DIGIT_CHARS + EN_DIGIT_CHARS):
+            if (len(ch) == 1 and ch in DIGIT_WHITELIST
+                    and (not detect_separators or E.result_confidence(res) >= .50)):
                 reads.append(ch)
         agreed = len(reads) >= 2 and len({_norm_digits(ch) for ch in reads}) == 1
         if not agreed:
@@ -578,9 +652,10 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             if ok and all(encoded.tobytes() != images[index] for index in indices):
                 m.inc('ocr_calls')
                 extra = E.ocr_many(engine_list, [encoded.tobytes()], region_kind='glyph',
-                                   whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)[0] or {}
+                                   whitelist=DIGIT_WHITELIST)[0] or {}
                 ch = extra.get('text', '').strip()
-                if len(ch) == 1 and ch in FA_DIGIT_CHARS + EN_DIGIT_CHARS:
+                if (len(ch) == 1 and ch in DIGIT_WHITELIST
+                        and (not detect_separators or E.result_confidence(extra) >= .50)):
                     reads.append(ch)
             counts = {digit: sum(_norm_digits(ch) == digit for ch in reads)
                       for digit in map(_norm_digits, reads)}
@@ -588,6 +663,11 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             agreed = winner is not None and counts[winner] >= 2
             if agreed:
                 reads = [next(ch for ch in reads if _norm_digits(ch) == winner)]
+        if not agreed or (detect_separators and reads and _norm_digits(reads[0]) in '3469'):
+            alternate = _script_digit_read(engine_list, g, m)
+            if alternate is not None:
+                reads = [alternate.translate(str.maketrans(EN_DIGIT_CHARS, FA_DIGIT_CHARS))]
+                agreed = True
         if agreed:
             confirmed_positions.append(len(out))
         else:
@@ -638,15 +718,33 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
     """
     remaining = 16  # Bound extra OCR work per page.
     height, width = source.shape[:2]
-    for word in words:
+    # Dates/identifiers and four-digit values must not lose their verification
+    # budget to false numeric readings in a letterhead or footer.
+    candidates = [word for word in words if not word.get('numeric_verified')
+                  and re.fullmatch(r"[۰-۹][۰-۹,٬٫./-]{1,23}", word.get('text', ''))
+                  and (set(word['text']) & {'۲', '۳'}
+                       or re.fullmatch(r'۱[۰-۹]{3}', word['text']))]
+    candidates.sort(key=lambda word: (not bool(re.search(r'[/.-]', word['text'])),
+                                      len(word['text']) != 4))
+    latin_words = [word for word in words if word.get('bbox')
+                   and re.search(r'[A-Za-z]{3,}', word.get('text', ''))]
+    for word in candidates:
         original = word.get("text", "")
-        if not re.fullmatch(r"[۰-۹][۰-۹,٬٫./-]{1,23}", original) or not set(original) & {"۲", "۳"}:
+        x0, y0, x1, y1 = word['bbox']
+        latin_neighbour = y0 > .85 * height and any(
+                              abs((other['bbox'][1]+other['bbox'][3]-y0-y1)/2) <= y1-y0
+                              and max(0, other['bbox'][0]-x1, x0-other['bbox'][2]) <= 6*(y1-y0)
+                              for other in latin_words)
+        if y0 > .85 * height and ((word.get('confidence') or 0) >= .85 or latin_neighbour):
+            # Footer contact details often overlap rules or Latin text. An
+            # isolated glyph vote must not overwrite a confident full-word read.
+            if latin_neighbour and (word.get('confidence') or 0) < .85:
+                word['needs_review'] = True
             continue
         if not remaining:
             word["needs_review"] = True
             continue
         remaining -= 1
-        x0, y0, x1, y1 = word["bbox"]
         pad = max(4, int((y1 - y0) * 0.04))
         crop = source[max(0, y0 - pad):min(height, y1 + pad),
                       max(0, x0 - pad):min(width, x1 + pad)]
@@ -681,6 +779,52 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
         if verified != original:
             word["text"] = verified
             word["needs_review"] = True
+
+
+def _recover_header_numbers(words: list[dict], source: np.ndarray,
+                            engines: list[E.OCREngine], metrics: Metrics, dpi: int = 2000) -> None:
+    """Recover collapsed numeric fields only beside a recognized header label.
+
+    No expected date, filename, calendar range or letter-number template is
+    supplied to recognition. Every digit and slash must come from the pixels.
+    """
+    height, width = source.shape[:2]
+    labels = [word for word in words if word.get('bbox') and
+              re.sub(r'[^آ-یA-Za-z]', '', word.get('text', '')).lower()
+              in {'تاریخ', 'تار', 'شماره', 'شما', 'date', 'no'}]
+    remaining = 6
+    for word in words:
+        original = word.get('text', '')
+        if (not remaining or not word.get('bbox') or word.get('numeric_verified')
+                or (word.get('confidence') or 0) >= .85):
+            continue
+        x0, y0, x1, y1 = word['bbox']
+        word_height = max(1, y1-y0)
+        if (y0 > .30 * height or not 3.5 <= (x1-x0)/word_height <= 24
+                or not re.fullmatch(r'[۰-۹٠-٩0-9/.-]+|[آ-ی]{1,4}', original)):
+            continue
+        nearby = any(0 <= label['bbox'][0]-x1 <= .18*width
+                     and abs((label['bbox'][1]+label['bbox'][3]-y0-y1)/2) <= word_height
+                     for label in labels if label is not word)
+        if not nearby:
+            continue
+        remaining -= 1
+        word['needs_review'] = True
+        pad = max(3, round(.08 * word_height))
+        crop = source[max(0,y0-pad):min(height,y1+pad),max(0,x0-pad):min(width,x1+pad)]
+        if not crop.size:
+            continue
+        try:
+            result = _glyph_digit_ocr(engines, crop, metrics, dpi=dpi, detect_separators=True)
+        except (RuntimeError, OSError, ValueError):
+            continue
+        candidate = _norm_digits(result.get('text', ''))
+        if result.get('needs_review') or not re.fullmatch(r'[0-9]{1,10}(?:/[0-9]{1,10}){1,3}', candidate):
+            continue
+        word.setdefault('raw_ocr_text', original)
+        word['text'] = E.display_text(candidate)
+        word['numeric_verified'] = True
+        word['recognition_repaired'] = True
 
 
 def _ocr_table(region: L.Region, proc: np.ndarray,
@@ -812,6 +956,15 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
                 api_key: str | None = None, force_tesseract: bool = False,
                 max_pages: int = 0, debug: bool = True,
                 langs: str = "fas", progress_cb=None) -> dict:
+    """Own native workers and PDF handles, including exceptional exits."""
+    reuse = os.environ.get('OCR_PERSISTENT_ENGINE', '1') != '0'
+    with E.TesseractEngine(langs, reuse_model=reuse) as local, pymupdf.open(pdf_path) as doc:
+        return _process_document(doc, local, pdf_path, out_dir, dpi, api_key,
+                                 force_tesseract, max_pages, debug, progress_cb)
+
+
+def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
+                       force_tesseract, max_pages, debug, progress_cb):
     """پردازش کامل یک PDF — مستر 2000DPI (بخش ۳۰)."""
     t0 = time.perf_counter()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -823,10 +976,9 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
         key = api_key or os_key()
         if key:
             engine_list.append(E.GoogleVisionEngine(key))
-    engine_list.append(E.TesseractEngine(langs))
+    engine_list.append(local_engine)
     engine = E.pick_engine(engine_list)
 
-    doc = pymupdf.open(pdf_path)
     n_pages = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
     if progress_cb:
         progress_cb({"type": "start", "pages": n_pages, "dpi": dpi})
@@ -862,8 +1014,6 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
         finally:
             m.stop()
 
-    doc.close()
-
     stem = pdf_path.stem
     txt = build_txt(pages_res)
     (out_dir / f"{stem}.txt").write_text(txt, "utf-8")
@@ -879,6 +1029,7 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
             "ocr_calls": sum(p.get("metrics", {}).get("ocr_calls", 0) for p in pages_res),
             "ocr_processes": engine_list[-1].statistics()["ocr_processes"],
             "ocr_cache_hits": engine_list[-1].statistics()["ocr_cache_hits"],
+            "ocr_native_calls": engine_list[-1].statistics().get("ocr_native_calls", 0),
             "fallbacks": sum(p.get("metrics", {}).get("fallbacks", 0) for p in pages_res),
             "low_confidence_regions": sum(p.get("low_confidence_words", 0)
                                           for p in pages_res),

@@ -13,6 +13,7 @@ import base64
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,8 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
+
+from .native_pool import NativePool
 
 VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
 TESSERACT_IMAGE = "ocr-tesseract:fa"
@@ -615,7 +618,7 @@ class GoogleVisionEngine(OCREngine):
 class TesseractEngine(OCREngine):
     name = "tesseract"
 
-    def __init__(self, langs: str = "fas"):
+    def __init__(self, langs: str = "fas", *, reuse_model: bool = False):
         # fas تنها پیش‌فرض — eng در فارسی نویز حرف تولید می‌کند (eng اختیاری با --langs)
         self.langs = langs
         self._docker_ok: bool | None = None
@@ -627,6 +630,12 @@ class TesseractEngine(OCREngine):
         self._cache_lock = threading.Lock()
         self._processes = 0
         self._cache_hits = 0
+        self._reuse_model = reuse_model
+        self._pool = None
+        self._pool_disabled = False
+        self._pool_lock = threading.Lock()
+        self._pool_starts = 0
+        self._native_calls = 0
         self.tessdata_dir = Path(os.environ.get("OCR_TESSDATA_DIR") or
                                  Path(__file__).resolve().parent.parent / "tessdata")
         candidates = [os.environ.get("TESSERACT_CMD", ""), "tesseract",
@@ -634,6 +643,48 @@ class TesseractEngine(OCREngine):
                       r"C:\Program Files\Tesseract-OCR\tesseract.exe"]
         self.executable = next((path for candidate in candidates
                                 if candidate and (path := shutil.which(candidate))), None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+    def close(self):
+        with self._pool_lock:
+            pool, self._pool = self._pool, None
+            self._pool_disabled = True
+        if pool is not None:
+            pool.close()
+        with self._cache_lock:
+            self._cache.clear()
+            self._cache_bytes = 0
+
+    def _pooled_read(self, png, psm, whitelist, language):
+        if not self._reuse_model or not NativePool.supported(self.executable):
+            return None
+        pool = None
+        try:
+            with self._pool_lock:
+                if self._pool_disabled:
+                    return None
+                if self._pool is None:
+                    self._pool = NativePool(Path(self.executable).resolve().parent,
+                                            self.tessdata_dir.resolve())
+                    self._pool_starts += self._pool.workers
+                pool = self._pool
+            payload = pool.recognize(png, psm, whitelist, language)
+            with self._cache_lock:
+                self._native_calls += 1
+            return payload
+        except (OSError, RuntimeError, ValueError, EOFError, TimeoutError):
+            with self._pool_lock:
+                self._pool_disabled = True
+                self._pool = None
+            if pool is not None:
+                pool.close()
+            logging.getLogger(__name__).warning('Native OCR worker unavailable; using CLI fallback')
+            return None
 
     def native_ok(self) -> bool:
         if self._native_ok is None:
@@ -696,6 +747,29 @@ class TesseractEngine(OCREngine):
         native = self.native_ok()
         if not native and not self.docker_ok():
             raise RuntimeError("هیچ موتور محلی OCR در دسترس نیست")
+        payload = self._pooled_read(png, psm, whitelist, langs_eff) if native else None
+        if payload is None:
+            payload = self._ocr_subprocess(png, psm, whitelist, langs_eff, native)
+        text, hocr = payload
+        words = self._parse_hocr(hocr)
+        confs = [w["confidence"] for w in words if w.get("confidence") is not None]
+        result = {"text": text, "words": words,
+                  "confidence": sum(confs) / len(confs) if confs else None,
+                  "engine": "tesseract", "psm": psm}
+        size = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+        if size <= 256 * 1024:
+            with self._cache_lock:
+                previous = self._cache.pop(key, None)
+                if previous:
+                    self._cache_bytes -= previous[1]
+                self._cache[key] = (copy.deepcopy(result), size)
+                self._cache_bytes += size
+                while len(self._cache) > 128 or self._cache_bytes > 4 * 1024 * 1024:
+                    _, (_, removed_size) = self._cache.popitem(last=False)
+                    self._cache_bytes -= removed_size
+        return result
+
+    def _ocr_subprocess(self, png, psm, whitelist, langs_eff, native):
         # گذر دوم لاتین‌محور: زبان متفاوت (مثل fas+eng) فقط در نواحی لاتین‌محور (بخش ۷)
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
             tf.write(png)
@@ -735,35 +809,17 @@ class TesseractEngine(OCREngine):
             if p.returncode != 0:
                 raise RuntimeError("tesseract: " + p.stderr.decode(errors="replace")[:300])
             text = Path(base + ".txt").read_text("utf-8")
-            words = self._parse_hocr(Path(base + ".hocr").read_text("utf-8")
-                                     if Path(base + ".hocr").is_file() else "")
-            confs = [w["confidence"] for w in words if w.get("confidence") is not None]
-            result = {
-                "text": text,
-                "words": words,
-                "confidence": (sum(confs) / len(confs)) if confs else None,
-                "engine": "tesseract",
-                "psm": psm,
-            }
-            size = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
-            if size <= 256 * 1024:
-                with self._cache_lock:
-                    previous = self._cache.pop(key, None)
-                    if previous:
-                        self._cache_bytes -= previous[1]
-                    self._cache[key] = (copy.deepcopy(result), size)
-                    self._cache_bytes += size
-                    while len(self._cache) > 128 or self._cache_bytes > 4 * 1024 * 1024:
-                        _, (_, removed_size) = self._cache.popitem(last=False)
-                        self._cache_bytes -= removed_size
-            return result
+            hocr = Path(base + ".hocr").read_text("utf-8") if Path(base + ".hocr").is_file() else ""
+            return text, hocr
         finally:
             os.unlink(tmp_in)
             shutil.rmtree(outdir, ignore_errors=True)
 
     def statistics(self) -> dict[str, int]:
         with self._cache_lock:
-            return {"ocr_processes": self._processes, "ocr_cache_hits": self._cache_hits}
+            return {"ocr_processes": self._processes + self._pool_starts,
+                    "ocr_cache_hits": self._cache_hits,
+                    **({'ocr_native_calls': self._native_calls} if self._reuse_model else {})}
 
     @staticmethod
     def _parse_hocr(hocr_html: str) -> list[dict]:
@@ -813,6 +869,20 @@ def ocr_any(engines: list[OCREngine], png: bytes, region_kind: str = "text",
     def better(r: dict) -> bool:
         if best is None:
             return True
+        if (region_kind == 'text' and not whitelist
+                and len(best.get('words') or []) >= 20 and len(r.get('words') or []) >= 20):
+            before = sum(char.isalnum() for char in best.get('text', ''))
+            after = sum(char.isalnum() for char in r.get('text', ''))
+            # Sparse mode can report a higher mean confidence simply by
+            # omitting a difficult line. Require both coverage and a meaningful
+            # confidence gain before replacing a dense paragraph with it.
+            if r.get('psm') == 11:
+                return after >= .98 * before and score(r) >= score(best) + .05
+            # Block mode may retain the omitted prose at nearly the same
+            # confidence. Never prefer a long, low-confidence hallucination.
+            if (r.get('psm') == 6 and score(r) >= .65
+                    and score(r) >= score(best) - .025 and after >= 1.02 * before):
+                return True
         return score(r) > score(best) + 1e-9
 
     for eng in engines:
@@ -833,7 +903,7 @@ def ocr_any(engines: list[OCREngine], png: bytes, region_kind: str = "text",
                 if alt_psm == primary_psm:
                     continue
                 try:
-                    r2 = eng.ocr_image(png, psm=alt_psm, **kw)
+                    r2 = eng.ocr_image(png, psm=alt_psm, whitelist=whitelist, **kw)
                 except Exception:
                     continue
                 extra_passes += 1
@@ -845,7 +915,7 @@ def ocr_any(engines: list[OCREngine], png: bytes, region_kind: str = "text",
         if score(best) < accept and variants:
             for v in variants[:2]:
                 try:
-                    r3 = eng.ocr_image(v, psm=primary_psm, **kw)
+                    r3 = eng.ocr_image(v, psm=primary_psm, whitelist=whitelist, **kw)
                 except Exception:
                     continue
                 extra_passes += 1

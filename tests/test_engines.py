@@ -6,6 +6,26 @@ from ocr_pipeline.engines import GoogleVisionEngine, TesseractEngine, ocr_any, p
 
 
 class EngineTests(unittest.TestCase):
+    def test_sparse_retry_cannot_gain_confidence_by_omitting_difficult_prose(self):
+        engine = TesseractEngine()
+        def result(psm, confidence, letters):
+            return {'psm':psm,'text':'ک'*letters,'words':[{'text':'کلمه'}]*25,
+                    'confidence':confidence}
+        with patch.object(engine,'ocr_image',side_effect=[result(3,.75,1000),
+                result(11,.78,950),result(6,.73,1030)]):
+            answer=ocr_any([engine],b'image',region_kind='text')
+        self.assertEqual(answer['psm'],6)
+
+    def test_long_low_confidence_retry_cannot_displace_readable_paragraph(self):
+        engine=TesseractEngine()
+        def result(psm,confidence,letters):
+            return {'psm':psm,'text':'ک'*letters,'words':[{'text':'کلمه'}]*25,
+                    'confidence':confidence}
+        with patch.object(engine,'ocr_image',side_effect=[result(3,.8,1000),
+                result(11,.81,1000),result(6,.5,2000)]):
+            answer=ocr_any([engine],b'image',region_kind='text')
+        self.assertEqual(answer['psm'],3)
+
     def test_native_engine_is_selectable_without_docker(self):
         engine = TesseractEngine()
         with patch.object(engine, "native_ok", return_value=True), patch.object(engine, "docker_ok") as docker:
@@ -54,6 +74,17 @@ class EngineTests(unittest.TestCase):
             return Mock(returncode=0)
         with patch.object(engine, "native_ok", return_value=True), patch("ocr_pipeline.engines.subprocess.run", side_effect=execute):
             self.assertEqual(engine.ocr_image(b"test", whitelist=whitelist)["text"], "۱۲۳۴۵")
+
+    def test_numeric_whitelist_and_language_survive_all_retry_passes(self):
+        engine = TesseractEngine()
+        with patch.object(engine, 'ocr_image', side_effect=lambda *_a, **_k:
+                          {'text': '۱', 'confidence': .2, 'words': []}) as read:
+            ocr_any([engine], b'original', region_kind='glyph', variants=[b'variant'],
+                    whitelist='۰۱۲۳', langs_override='fas')
+        self.assertEqual(read.call_count, 4)
+        for call in read.call_args_list:
+            self.assertEqual(call.kwargs['whitelist'], '۰۱۲۳')
+            self.assertEqual(call.kwargs['langs'], 'fas')
 
 
 if __name__ == "__main__":

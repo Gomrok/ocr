@@ -17,7 +17,7 @@ def main() -> None:
     settings = json.loads(args.settings.read_text(encoding="utf-8-sig"))
     allowed = {"OCR_SECRET_KEY", "OCR_SECURE_COOKIES", "OCR_ALLOWED_HOSTS",
                "OCR_DATA_DIR", "OCR_TESSERACT_ONLY", "OCR_TESSDATA_DIR",
-               "TESSERACT_CMD", "GOOGLE_API_KEY", "OMP_THREAD_LIMIT"}
+               "TESSERACT_CMD", "GOOGLE_API_KEY", "OMP_THREAD_LIMIT", "OCR_PERSISTENT_ENGINE"}
     for key, value in settings.items():
         if key in allowed:
             os.environ[key] = str(value)
