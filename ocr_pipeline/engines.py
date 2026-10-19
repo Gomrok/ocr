@@ -24,13 +24,11 @@ import time
 import urllib.request
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 from pathlib import Path
 
 VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
 TESSERACT_IMAGE = "ocr-tesseract:fa"
-
-HOCR_WORD_RE = re.compile(
-    r"class='ocrx_word'[^>]*title='([^']+)'[^>]*>([^<]+)<", re.I)
 
 CONF_ACCEPT = 0.90      # بخش ۱۹
 CONF_RETRY = 0.75
@@ -54,6 +52,8 @@ AR_TO_FA = str.maketrans({
 FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
 EN_DIGITS = "0123456789"
 _FA2EN = str.maketrans(FA_DIGITS, EN_DIGITS)
+_EN2FA = str.maketrans(EN_DIGITS, FA_DIGITS)
+_ALL2EN = str.maketrans(FA_DIGITS + "٠١٢٣٤٥٦٧٨٩", EN_DIGITS * 2)
 _ZWNJ = "\u200c"
 _ZWNJ_SENTINEL = "\x00"
 
@@ -74,7 +74,95 @@ def normalize_text(raw: str, normalize_digits: bool = False,
 
 def en_digits_only(text: str) -> str:
     """نسخه با ارقام لاتین (فیلد مستقل — بخش ۶)."""
-    return text.translate(_FA2EN)
+    return text.translate(_ALL2EN)
+
+
+def display_text(raw: str) -> str:
+    """Formal Persian exports use one digit alphabet; raw OCR stays separate."""
+    return normalize_text(raw).translate(_EN2FA)
+
+
+def result_confidence(result: dict) -> float:
+    values = [w['confidence'] for w in result.get('words') or []
+              if w.get('confidence') is not None]
+    if values:
+        return sum(values) / len(values)
+    confidence = result.get('confidence')
+    return float(confidence) if confidence is not None else 0.0
+
+
+def prefer_latin_region(primary: dict, secondary: dict) -> bool:
+    """Accept a complete English line only when the pixels give strong evidence."""
+    words = secondary.get('words') or []
+    text = secondary.get('text', '')
+    if len(re.findall(r'[A-Za-z]{2,}', text)) < 2 or not words:
+        return False
+    return (all(_valid_latin_read(w['text']) for w in words)
+            and result_confidence(secondary) >= 0.85
+            and result_confidence(secondary) >= result_confidence(primary) + 0.10
+            and not any(re.search(r'[آ-غف-ی]{2,}', w['text'])
+                        and (w.get('confidence') or 0) >= 0.85
+                        for w in primary.get('words') or []))
+
+
+def select_consensus(results: list[dict]) -> dict:
+    """Equal vote counts must be decided by confidence, not candidate order."""
+    groups: dict[str, list[dict]] = {}
+    for result in results:
+        text = ' '.join(normalize_text(result.get('text', ''), normalize_digits=True).split())
+        if text:
+            groups.setdefault(text, []).append(result)
+    if not groups:
+        return dict(results[0]) if results else {'text': '', 'words': [], 'confidence': None}
+    # Repeated low-quality readings must not outvote a clean recognition.
+    trusted = [items for items in groups.values() if max(map(result_confidence, items)) >= 0.85]
+    group = max(trusted or groups.values(),
+                key=lambda items: (len(items), max(map(result_confidence, items))))
+    best = dict(max(group, key=result_confidence))
+    best['votes'] = len(group)
+    if len(groups) > 1:
+        best['needs_review'] = True
+    return best
+
+
+class _HocrWords(HTMLParser):
+    """Read entities and nested emphasis without dropping recognized words."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.words = []
+        self.current = None
+        self.depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if self.current is not None:
+            self.depth += 1
+            return
+        values = dict(attrs)
+        if 'ocrx_word' not in (values.get('class') or '').split():
+            return
+        title = values.get('title') or ''
+        bbox = re.search(r'bbox (\d+) (\d+) (\d+) (\d+)', title)
+        conf = re.search(r'x_wconf ([\d.]+)', title)
+        if bbox:
+            self.current = {'bbox': tuple(map(int, bbox.groups())),
+                            'confidence': float(conf[1]) / 100 if conf else None}
+            self.depth = 1
+            self.parts = []
+
+    def handle_data(self, data):
+        if self.current is not None:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if self.current is None:
+            return
+        self.depth -= 1
+        if self.depth == 0:
+            text = ''.join(self.parts).strip()
+            if text:
+                self.words.append({**self.current, 'text': text})
+            self.current = None
 
 
 # ───────────────────── شناسه‌ها و اعداد (بخش ۷ و ۲۸) ─────────────────────
@@ -362,6 +450,8 @@ def merge_latin_secondary(fas_words: list[dict],
                     and _valid_latin_read(eng_left[best_j]["text"]):
                 nw = dict(eng_left[best_j])
                 nw["bbox"] = w["bbox"]
+                nw['raw_ocr_text'] = w.get('raw_ocr_text', raw)
+                nw['recognition_repaired'] = True
                 nw["engine"] = "tesseract+eng"
                 nw.pop("needs_review", None)
                 out.append(nw)
@@ -396,6 +486,8 @@ def merge_latin_secondary(fas_words: list[dict],
             # خوانش eng (هرچند بااطمینان) تعویض نمی‌شود (بخش ۲۹)
             if _replaceable_token(w.get("text", "")):
                 ne = dict(e)
+                ne['raw_ocr_text'] = w.get('raw_ocr_text', w['text'])
+                ne['recognition_repaired'] = True
                 ne["engine"] = "tesseract+eng"
                 out[best_i] = ne
                 changes += 1
@@ -597,7 +689,7 @@ class TesseractEngine(OCREngine):
             text = Path(base + ".txt").read_text("utf-8")
             words = self._parse_hocr(Path(base + ".hocr").read_text("utf-8")
                                      if Path(base + ".hocr").is_file() else "")
-            confs = [w["confidence"] for w in words if w.get("confidence")]
+            confs = [w["confidence"] for w in words if w.get("confidence") is not None]
             result = {
                 "text": text,
                 "words": words,
@@ -627,18 +719,10 @@ class TesseractEngine(OCREngine):
 
     @staticmethod
     def _parse_hocr(hocr_html: str) -> list[dict]:
-        words = []
-        for title, text in HOCR_WORD_RE.findall(hocr_html):
-            m = re.search(r"bbox (\d+) (\d+) (\d+) (\d+)", title)
-            c = re.search(r"x_wconf ([\d.]+)", title)
-            if not m or not text.strip():
-                continue
-            words.append({
-                "text": text.strip(),
-                "bbox": tuple(int(m.group(i)) for i in range(1, 5)),
-                "confidence": float(c.group(1)) / 100 if c else None,
-            })
-        return words
+        parser = _HocrWords()
+        parser.feed(hocr_html)
+        parser.close()
+        return parser.words
 
     # PSM بر اساس نوع ناحیه (بخش ۱۶) + PSMهای بازیابی
     PSM_FOR = {"text": 3, "table_cell": 12, "numeric": 7, "glyph": 10,
@@ -731,7 +815,8 @@ def ocr_any(engines: list[OCREngine], png: bytes, region_kind: str = "text",
 
 
 def ocr_many(engines: list[OCREngine], images: list[bytes],
-             region_kind: str = "text", whitelist: str | None = None) -> list[dict | None]:
+             region_kind: str = "text", whitelist: str | None = None,
+             langs_override: str | None = None) -> list[dict | None]:
     """Run independent candidates in input order without dropping any passes.
 
     Only native, local OCR is parallelized. Docker and cloud retain their
@@ -739,7 +824,8 @@ def ocr_many(engines: list[OCREngine], images: list[bytes],
     """
     def recognize(image: bytes) -> dict | None:
         try:
-            return ocr_any(engines, image, region_kind=region_kind, whitelist=whitelist)
+            return ocr_any(engines, image, region_kind=region_kind, whitelist=whitelist,
+                           langs_override=langs_override)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
             return None
 

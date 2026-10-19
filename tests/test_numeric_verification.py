@@ -28,10 +28,29 @@ class NumericVerificationTests(unittest.TestCase):
             self.assertTrue(words[0]["needs_review"])
 
     def test_prose_and_latin_identifiers_are_preserved(self):
-        words = [{"text": text} for text in ("شرکت", "INV-2026-0042", "2026", "۱۲۳,۴۵۶")]
+        words = [{"text": text} for text in ("شرکت", "INV-2026-0042", "2026")]
         with patch("ocr_pipeline.pipeline._glyph_digit_ocr") as glyph:
             _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
             glyph.assert_not_called()
+
+    def test_separator_positions_and_unconfirmed_digits_are_preserved(self):
+        words = [{"text": "۱۳۳,۴۵۶", "bbox": (10, 10, 90, 40)}]
+        reading = {"text": "۱۲۳,۴۵۲", "needs_review": True,
+                   "confirmed_positions": [0, 1, 2, 3, 4, 5]}
+        with patch("ocr_pipeline.pipeline._glyph_digit_ocr", return_value=reading) as glyph:
+            _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
+        self.assertEqual(glyph.call_args.kwargs['expected_text'], '۱۳۳,۴۵۶')
+        self.assertEqual(words[0]['text'], '۱۲۳,۴۵۶')
+        self.assertEqual(words[0]['raw_ocr_text'], '۱۳۳,۴۵۶')
+        self.assertTrue(words[0]['needs_review'])
+        self.assertFalse(words[0]['numeric_verified'])
+
+    def test_numeric_recheck_never_drops_separators(self):
+        words = [{"text": "۱۳۳,۴۵۶", "bbox": (10, 10, 90, 40)}]
+        with patch("ocr_pipeline.pipeline._glyph_digit_ocr", return_value={'text': '۱۲۳۰۴۵۶'}):
+            _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
+        self.assertEqual(words[0]['text'], '۱۳۳,۴۵۶')
+        self.assertTrue(words[0]['needs_review'])
 
     def test_page_verification_work_is_bounded(self):
         words = [{"text": "۱۲۳", "bbox": (10, 10, 90, 40)} for _ in range(20)]

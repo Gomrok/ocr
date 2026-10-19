@@ -128,10 +128,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             # مقیاس‌های مختلف تکرار می‌شود (اکثریت غیرخالی برنده — مثل سلول‌ها).
             # پنجرهٔ طلایی ارقام ~33–37px (0.13–0.16 در مستر ۲۰۰۰DPI — تأیید تجربی)
             f0 = P.optimal_ocr_scale(crop)
-            if max(crop.shape[:2]) > 4500:
-                ladder = [f0, *(min(2.0, fac * reference_scale) for fac in (0.16, 0.13, 0.10))]
-            else:
-                ladder = [f0, round(f0 * 0.5, 3)]
+            ladder = [f0, *(min(2.0, fac * reference_scale) for fac in (0.16, 0.13, 0.10))]
             candidates = []
             for fac in dict.fromkeys(round(x, 3) for x in ladder if x >= 0.04):
                 ok, buf = cv2.imencode(
@@ -148,30 +145,9 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                     results.append(r)
             if not results:
                 continue
-            # رأی‌گیری: اکثریت متن غیرخالی؛ تساوی → اطمینان بالاتر (بخش ۱۴)
-            def _txt_of(rr):
-                return " ".join((rr.get("text") or "").split())
-
-            def _conf_of(rr):
-                cs = [w.get("confidence") for w in rr.get("words") or []
-                      if w.get("confidence") is not None]
-                return sum(cs) / len(cs) if cs else 0.0
-
-            groups: dict[str, list[dict]] = {}
-            for rr in results:
-                t = _txt_of(rr)
-                if t:
-                    groups.setdefault(t, []).append(rr)
-            if groups:
-                best_group = max(groups.values(), key=len)
-                res = max(best_group, key=_conf_of)
-                f = res["_scale"]
-                if len(best_group) == 1 and len(groups) > 1:
-                    res = dict(res)
-                    res["needs_review"] = True  # سازگاری ضعیف — بخش ۲۷
-            else:
-                res = results[0]
-                f = res["_scale"]
+            res = E.select_consensus(results)
+            f = res["_scale"]
+            region_raw_text = res.get('text', '')
             page_engines.add(res.get("engine", "?"))
             if res.get("multipass"):
                 m.inc("fallbacks")
@@ -182,7 +158,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             # (بخش ۲۹ — استخراجی، بدون تصحیح حدسی)
             if res.get("words") and isinstance(engine_list[-1], E.TesseractEngine) \
                     and (E.needs_latin_repair(res["words"])
-                         or E.region_has_latin_context(res["words"])):
+                         or E.region_has_latin_context(res["words"])
+                         or E.result_confidence(res) < 0.75):
                 # مقیاس گذر eng: هدف ~35px گلیف (ارقام لاتین بزرگ‌تر از فارسی‌اند)
                 f_eng = max(0.10, min(0.35 * reference_scale, P.optimal_ocr_scale(crop,
                                                                 target_h=35.0)))
@@ -198,12 +175,12 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                         ew = []
                         for x in r_eng.get("words") or []:
                             bx = x["bbox"]
-                            x["bbox"] = (int((bx[0] - 30) * k),
-                                         int((bx[1] - 30) * k),
-                                         int((bx[2] - 30) * k),
-                                         int((bx[3] - 30) * k))
+                            x["bbox"] = tuple(int((v - 30) * k) + 30 for v in bx)
                             ew.append(x)
-                        mw, nch = E.merge_latin_secondary(res["words"], ew)
+                        if E.prefer_latin_region(res, r_eng):
+                            mw, nch = ew, len(ew)
+                        else:
+                            mw, nch = E.merge_latin_secondary(res["words"], ew)
                         if nch:
                             res["words"] = mw
                             res["text"] = "\n".join(E.words_to_lines(mw))
@@ -225,11 +202,13 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                              min(rx1, int((bx[2] - pad_s) * ws_inv) + rx0),
                              min(ry1, int((bx[3] - pad_s) * ws_inv) + ry0))
                 words_all.append(w)
-            if res.get("text", "").strip():
-                text_parts.append(res["text"].strip())
+            if region_raw_text.strip():
+                text_parts.append(region_raw_text.strip())
 
     # ── ساختار سطری متن صفحه از کلمات (بخش ۵ و ۲۱) ──
     words_all = E.merge_word_lists([words_all])
+    with m.step('recognition_repair'):
+        _repair_suspicious_words(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     with m.step("numeric_verification"):
         _verify_text_numbers(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     for w in words_all:
@@ -238,7 +217,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             w["needs_review"] = True
         if w.get("needs_review"):
             low_conf += 1
-    lines = E.words_to_lines(words_all)
+    lines = [E.display_text(line) for line in E.words_to_lines(words_all)]
     raw_text = "\n".join(text_parts)
 
     m.low_conf_regions += low_conf
@@ -247,7 +226,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
 
     # متن نهایی صفحه: سطرهای بازسازی‌شده (حفظ ترتیب بصری RTL)
     final_text = "\n".join(lines) if lines else raw_text
-    normalized = E.normalize_text(final_text)
+    normalized = E.display_text(final_text)
 
     # متن جدول‌ها هم در متن صفحه (Markdown) — بخش ۲۳
     tables_out.sort(key=lambda t: min(c["bbox"][1] for c in t["cells"])
@@ -268,24 +247,27 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "regions": [{"kind": r.kind, "bbox": list(r.bbox)} for r in regions],
         "blocks": [{"kind": r.kind, "bbox": list(r.bbox)} for r in regions],
         "lines": lines,
-        "words": [{"text": w["text"], "bbox": list(w["bbox"]),
+        "words": [{"text": E.display_text(w["text"]), "bbox": list(w["bbox"]),
                    "confidence": w.get("confidence"),
-                   **({"raw_ocr_text": w["raw_ocr_text"], "numeric_verified": True}
-                      if w.get("numeric_verified") else {}),
+                   "raw_ocr_text": w.get("raw_ocr_text", w["text"]),
+                   **({"numeric_verified": True} if w.get("numeric_verified") else {}),
+                   **({"recognition_repaired": True} if w.get("recognition_repaired") else {}),
                    **({"needs_review": True} if w.get("needs_review") else {})}
                   for w in words_all],
         "raw_text": raw_text,
         "normalized_text": normalized,
         "normalized_en_digits": E.en_digits_only(normalized),
-        "text": E.normalize_text(final_text),
+        "text": normalized,
+        "digit_style": "persian",
         "tables": [{"table_id": t["table_id"], "rows": t["rows"],
                     "columns": t["columns"],
                     "markdown": T.markdown_table(t)} for t in tables_out],
         "confidence": page_conf,
         "engines": sorted(page_engines) if page_engines else [engine_list[0].name],
-        "identifiers": E.find_identifiers(normalized),
+        "identifiers": [E.display_text(value) for value in E.find_identifiers(E.en_digits_only(normalized))],
         "validation": validate_text(raw_text),
-        "low_confidence_words": low_conf,
+        "low_confidence_words": low_conf + sum(
+            bool(cell.get('needs_review')) for table in tables_out for cell in table['cells']),
     }
 
     if debug_dir and tables_out:
@@ -345,31 +327,74 @@ def _cell_ocr_best(engine_list: list[E.OCREngine], crop: np.ndarray,
     if not results:
         return {"text": "", "words": [], "confidence": None, "engine": "none"}
 
-    def txt_of(r: dict) -> str:
-        return " ".join((r.get("text") or "").split())
+    return E.select_consensus(results)
 
-    def score(r: dict) -> float:
-        c = r.get("confidence")
-        return float(c) if c is not None else (0.5 if txt_of(r) else 0.0)
 
-    # گروه‌بندی متن‌های غیرخالی (خالی هرگز برنده نمی‌شود — بخش ۲۷)
-    groups: dict[str, list[dict]] = {}
-    for r in results:
-        t = txt_of(r)
-        if t:
-            groups.setdefault(t, []).append(r)
-    if groups:
-        best_group = max(groups.values(), key=len)
-        best = max(best_group, key=score)
-        best = dict(best)
-        best["votes"] = len(best_group)
-        # سازگاری ضعیف + اطمینان پایین → نیاز به بازبینی (بخش ۲۷)
-        if len(best_group) == 1 and (score(best) < 0.9 or len(groups) > 2):
-            best["needs_review"] = True
-    else:
-        best = {"text": "", "words": [], "confidence": None,
-                "engine": results[0].get("engine", "tesseract")}
-    return best
+def _confirmed_crop_read(engine_list: list[E.OCREngine], crop: np.ndarray,
+                         m: Metrics, *, langs: str | None = None) -> dict | None:
+    """Two independent raster scales must agree before a targeted repair."""
+    crop = _ink_tight_crop(crop)
+    scale = min(2.0, 48.0 / max(1, _ink_tight_crop(crop, margin=0).shape[0]),
+                3500.0 / max(crop.shape))
+    images = []
+    for factor in (scale, round(scale * 0.72, 3)):
+        if any(round(size * factor) < 1 for size in crop.shape):
+            return None
+        ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(crop, factor)))
+        if ok:
+            images.append(encoded.tobytes())
+    if len(images) != 2 or images[0] == images[1]:
+        return None
+    m.inc('ocr_calls', 2)
+    readings = E.ocr_many(engine_list, images, region_kind='line', langs_override=langs)
+    if any(not r or E.result_confidence(r) < 0.85 for r in readings):
+        return None
+    texts = [' '.join(E.normalize_text(r.get('text', ''), normalize_digits=True).split())
+             for r in readings]
+    if not texts[0] or texts[0] != texts[1]:
+        return None
+    return max(readings, key=E.result_confidence)
+
+
+def _repair_suspicious_words(words: list[dict], source: np.ndarray,
+                             engines: list[E.OCREngine], metrics: Metrics, dpi: int = 2000) -> None:
+    """Re-read rejected symbols from pixels. Never erase or guess an asterisk."""
+    remaining = 16
+    height, width = source.shape[:2]
+    for word in words:
+        original = word.get('text', '')
+        if '*' not in original and '\ufffd' not in original:
+            continue
+        word['needs_review'] = True
+        # A confident literal star or masking sequence is source content.
+        if (word.get('confidence') or 0) >= 0.85 or '**' in original or not remaining:
+            continue
+        remaining -= 1
+        x0, y0, x1, y1 = word['bbox']
+        pad = max(4, round((y1 - y0) * 0.15))
+        crop = source[max(0, y0-pad):min(height, y1+pad), max(0, x0-pad):min(width, x1+pad)]
+        if not crop.size:
+            continue
+        langs = 'eng' if re.search(r'[A-Za-z]', original) and not re.search(r'[آ-ی]', original) else None
+        repair = _confirmed_crop_read(engines, crop, metrics, langs=langs)
+        pattern = ''.join('.' if c in '*\ufffd' else re.escape(c)
+                          for c in E.en_digits_only(original))
+        if (not repair or not re.fullmatch(pattern, E.en_digits_only(repair.get('text', '').strip()))) \
+                and re.fullmatch(r'[۰-۹0-9*\ufffd]{2,16}', original):
+            glyph = _glyph_digit_ocr(engines, crop, metrics, dpi=dpi)
+            if not glyph.get('needs_review') and re.fullmatch(r'[۰-۹0-9]{2,16}', glyph.get('text', '')):
+                repair = glyph
+        if not repair:
+            continue
+        candidate = ' '.join(repair.get('text', '').split())
+        # Both readings must fill the same rejected positions and retain every
+        # recognized character, including punctuation and numeric separators.
+        if re.search(r'[*\ufffd]', candidate) or not re.fullmatch(pattern, E.en_digits_only(candidate)):
+            continue
+        word['raw_ocr_text'] = word.get('raw_ocr_text', original)
+        word['text'] = candidate
+        word['confidence'] = repair.get('confidence')
+        word['recognition_repaired'] = True
 
 
 FA_DIGIT_CHARS = "۰۱۲۳۴۵۶۷۸۹"
@@ -383,7 +408,7 @@ def _norm_digits(s: str) -> str:
 
 
 def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
-                     m: Metrics, dpi: int = 2000) -> dict:
+                     m: Metrics, dpi: int = 2000, expected_text: str | None = None) -> dict:
     """گذر عددی گلیف‌به‌گلیف (بخش ۲۸ — دقت عدد حیاتی است).
 
     قواعد مبتنی بر شکل (استخراجی، نه حدسی — بخش ۲۹):
@@ -433,16 +458,30 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         else:
             bases.append(s)  # دایرهٔ صفر و امثالش — گلیف مستقل
     bases.sort(key=lambda c: c[0])  # ارقام LTR می‌شینند
-    digit_band_top = min((b[1] for b in bases), default=0)
-    digit_band_bot = max((b[1] + b[3] for b in bases), default=H)
+    # Separator positions come only from an existing recognition. A component
+    # count mismatch is ambiguous: do not turn commas, dates or decimals into zeros.
+    if expected_text is not None and len(bases) != len(expected_text):
+        return {"text": "", "needs_review": True}
+    baseline = float(np.median([b[1] + b[3] for b in bases if b[3] >= 0.65 * med_h]))
     out = []
+    confirmed_positions = []
     uncertain = False
     glyphs = []
     images = []
-    for (x, y, w, h) in bases:
+    for glyph_index, (x, y, w, h) in enumerate(bases):
+        if expected_text is not None and not expected_text[glyph_index].isdigit():
+            glyphs.append((expected_text[glyph_index], []))
+            continue
+        if (expected_text is None and h < 0.65 * med_h and w < h
+                and y + h > baseline + 0.15 * med_h):
+            # A comma descends below the digit baseline; Persian zero does not.
+            # Keep the visible separator instead of feeding it to a digit-only pass.
+            glyphs.append((',', []))
+            continue
         # قانون شکل صفر فارسی: دایرهٔ کوچکِ در نیمهٔ پایینیِ نوار ارقام
-        if h < 0.45 * med_h and w <= 1.8 * h and \
-                (y + h / 2) > (digit_band_top + digit_band_bot) / 2:
+        if (h < 0.60 * hmax and 0.65 * h <= w <= 1.8 * h
+                and y + h >= baseline - 0.25 * hmax
+                and y + h <= baseline + 0.15 * hmax):
             glyphs.append((None, []))
             continue
         x0m, y0m = max(0, x - h // 3), max(0, y - h // 3)
@@ -452,9 +491,13 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         g = np.full((y1m - y0m, x1m - x0m), 255, dtype=crop.dtype)
         g[y - y0m:y - y0m + h, x - x0m:x - x0m + w] = crop[y:y + h, x:x + w]
         # هدف 80px — کالیبره‌شده روی تست confusion ارقام (۳/۴ در ارتفاع کم مخلوط می‌شوند)
-        f = P.optimal_ocr_scale(g, target_h=80.0)
+        # We already know this glyph's ink height. The paragraph estimator
+        # excludes tall components and can leave a single 2000-DPI digit huge.
+        f = min(2.0, 80.0 / h, 3500.0 / max(g.shape))
         indices = []
         for fac in dict.fromkeys([f, round(f * 0.55, 3)]):
+            if any(round(size * fac) < 1 for size in g.shape):
+                continue
             g2 = P.pad_white(P.resize_by_factor(g, fac))
             ok, buf = cv2.imencode(".png", g2)
             if not ok:
@@ -466,7 +509,12 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
     readings = E.ocr_many(engine_list, images, region_kind="glyph",
                           whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)
     for g, indices in glyphs:
+        if isinstance(g, str):
+            confirmed_positions.append(len(out))
+            out.append(g)
+            continue
         if g is None:
+            confirmed_positions.append(len(out))
             out.append("۰")
             continue
         reads = []
@@ -475,7 +523,31 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             ch = (res.get("text") or "").strip().replace("\n", " ")
             if len(ch) == 1 and ch in (FA_DIGIT_CHARS + EN_DIGIT_CHARS):
                 reads.append(ch)
-        if len(reads) < 2 or len({_norm_digits(ch) for ch in reads}) != 1:
+        agreed = len(reads) >= 2 and len({_norm_digits(ch) for ch in reads}) == 1
+        if not agreed:
+            # Only disputed glyphs pay for a tie-breaker. Do not pick the first
+            # reading simply because it was scheduled first.
+            factor = min(2.0, 60.0 / max(1, _ink_tight_crop(g, margin=0).shape[0]),
+                         3500.0 / max(g.shape))
+            ok, encoded = (False, None)
+            if all(round(size * factor) >= 1 for size in g.shape):
+                ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(g, factor)))
+            if ok and all(encoded.tobytes() != images[index] for index in indices):
+                m.inc('ocr_calls')
+                extra = E.ocr_many(engine_list, [encoded.tobytes()], region_kind='glyph',
+                                   whitelist=FA_DIGIT_CHARS + EN_DIGIT_CHARS)[0] or {}
+                ch = extra.get('text', '').strip()
+                if len(ch) == 1 and ch in FA_DIGIT_CHARS + EN_DIGIT_CHARS:
+                    reads.append(ch)
+            counts = {digit: sum(_norm_digits(ch) == digit for ch in reads)
+                      for digit in map(_norm_digits, reads)}
+            winner = max(counts, key=counts.get) if counts else None
+            agreed = winner is not None and counts[winner] >= 2
+            if agreed:
+                reads = [next(ch for ch in reads if _norm_digits(ch) == winner)]
+        if agreed:
+            confirmed_positions.append(len(out))
+        else:
             uncertain = True
         if not reads:
             out.append("?")
@@ -509,8 +581,9 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         return {"text": ""}
     if uncertain:
         return {"text": text, "engine": "glyph_pass", "confidence": None,
-                "needs_review": True}
-    return {"text": text, "engine": "glyph_pass", "confidence": None}
+                "needs_review": True, "confirmed_positions": confirmed_positions}
+    return {"text": text, "engine": "glyph_pass", "confidence": None,
+            "confirmed_positions": confirmed_positions}
 
 
 def _verify_text_numbers(words: list[dict], source: np.ndarray,
@@ -524,7 +597,7 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
     height, width = source.shape[:2]
     for word in words:
         original = word.get("text", "")
-        if not re.fullmatch(r"[۰-۹]{2,16}", original) or not set(original) & {"۲", "۳"}:
+        if not re.fullmatch(r"[۰-۹][۰-۹,٬٫./-]{1,23}", original) or not set(original) & {"۲", "۳"}:
             continue
         if not remaining:
             word["needs_review"] = True
@@ -538,17 +611,30 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
             word["needs_review"] = True
             continue
         try:
-            result = _glyph_digit_ocr(engines, crop, metrics, dpi=dpi)
+            separators = any(not char.isdigit() for char in original)
+            result = _glyph_digit_ocr(engines, crop, metrics, dpi=dpi,
+                                      **({'expected_text': original} if separators else {}))
         except (RuntimeError, OSError, ValueError):
             word["needs_review"] = True
             continue
         candidate = _norm_digits(result.get("text", ""))
-        if result.get("needs_review") or not re.fullmatch(r"[0-9]{2,16}", candidate) or len(candidate) != len(original):
+        if (not re.fullmatch(r"[0-9][0-9,٬٫./-]{1,23}", candidate)
+                or len(candidate) != len(original)
+                or [(i, c) for i, c in enumerate(candidate) if not c.isdigit()]
+                != [(i, c) for i, c in enumerate(original) if not c.isdigit()]):
             word["needs_review"] = True
             continue
+        if result.get('needs_review'):
+            positions = result.get('confirmed_positions', [])
+            if not positions:
+                word['needs_review'] = True
+                continue
+            candidate = ''.join(char if index in positions else _norm_digits(original[index])
+                                for index, char in enumerate(candidate))
+            word['needs_review'] = True
         verified = candidate.translate(str.maketrans(EN_DIGIT_CHARS, FA_DIGIT_CHARS))
-        word["numeric_verified"] = True
-        word["raw_ocr_text"] = original
+        word["numeric_verified"] = not result.get('needs_review', False)
+        word.setdefault("raw_ocr_text", original)
         if verified != original:
             word["text"] = verified
             word["needs_review"] = True
@@ -564,6 +650,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
     cell_texts: dict = {}
     cell_confs: dict = {}
     cell_needs_review: dict = {}
+    original_readings: dict = {}
     engines_used: set[str] = set()
     H, W = img_shape
     for (r, c, bbox) in T.cell_bboxes(grid_abs):
@@ -581,33 +668,51 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
             m.inc("fallbacks")
         m.inc("fallbacks", int(res.get("extra_passes", 0)))
         txt = res.get("text", "").strip().replace("\n", " ")
+        original_readings[(r, c)] = txt
         conf = res.get("confidence")
+        # English numerals need the English model; Persian-only recognition can
+        # drop a decimal point or read 500 as 00. Require matching full readings.
+        if re.fullmatch(r'[0-9۰-۹٠-٩,٬٫./+%\s-]{1,32}', txt) and re.search(r'[0-9]', txt):
+            numeric = _confirmed_crop_read(engine_list, crop, m, langs='eng')
+            candidate = (numeric or {}).get('text', '').strip()
+            if re.fullmatch(r'[0-9][0-9,./+%\s-]{0,31}', candidate):
+                txt = candidate
+                conf = E.result_confidence(numeric)
+                if E.en_digits_only(txt) != E.en_digits_only(original_readings[(r, c)]):
+                    res['needs_review'] = True
+        if '*' in txt or '\ufffd' in txt:
+            suspect = {'text': txt, 'confidence': conf, 'bbox': (0, 0, crop.shape[1], crop.shape[0])}
+            _repair_suspicious_words([suspect], crop, engine_list, m, dpi=dpi)
+            txt, conf = suspect['text'], suspect.get('confidence')
+            res['needs_review'] = True
         # گذر عددی (بخش ۲۸): سلول عمدتاً عددی → گلیف‌به‌گلیف با whitelist
-        digits = sum(ch.isdigit() or ch in FA_DIGIT_CHARS for ch in txt)
-        if (txt and len(txt) <= 16 and digits >= max(2, len(txt.replace(" ", "")) - 2)) \
-                or (txt and len(txt) == 1 and txt in FA_DIGIT_CHARS):
+        if re.fullmatch(r'[۰-۹][۰-۹,٬٫./-]{0,23}', txt):
             # گذر گلیف از مستر خام (صفحهٔ تمیز) — فیلترها confusion ارقام می‌سازند
             glyph_src = raw_img if raw_img is not None else proc
             x0g, y0g, x1g, y1g = bx
             crop_g = glyph_src[y0g:min(img_shape[0], y1g),
                                x0g:min(img_shape[1], x1g)]
             crop_g = T.strip_grid_lines(crop_g)  # خطوط شبکه در برش خام هستند
-            r2 = _glyph_digit_ocr(engine_list, crop_g, m, dpi=dpi)
+            separators = any(not char.isdigit() for char in txt)
+            r2 = _glyph_digit_ocr(engine_list, crop_g, m, dpi=dpi,
+                                  **({'expected_text': txt} if separators else {}))
             t2 = r2.get("text", "")
-            complete = re.fullmatch(r"[۰-۹0-9]{1,16}", t2)
-            if not complete:
+            complete = re.fullmatch(r"[۰-۹0-9][۰-۹0-9,٬٫./-]{0,23}", t2)
+            if complete and r2.get('needs_review') and len(t2) == len(txt):
+                confirmed = r2.get('confirmed_positions', [])
+                t2 = ''.join(char if i in confirmed else txt[i] for i, char in enumerate(t2))
+                if confirmed:
+                    txt, conf = t2, None
+                res['needs_review'] = True
+            elif not complete or r2.get('needs_review'):
                 # A failed parallel candidate must not turn a partial number
                 # into a replacement for the full original cell value.
                 res["needs_review"] = True
-            elif _norm_digits(t2) == _norm_digits(txt) and not r2.get("needs_review"):
-                conf = max(conf or 0, 0.97)  # دو مسیر مستقل تأیید کردند (هر سیستمی که باشد)
             elif _norm_digits(t2) != _norm_digits(txt):
                 # عدم توافق واقعی: نتیجهٔ گذر تمیزتر (مستر خام) + پرچم بازبینی صریح
                 txt = t2
                 conf = None
                 res["needs_review"] = True  # بخش ۲۷: عدم توافق پنهان نمی‌شود
-            elif r2.get("needs_review"):
-                res["needs_review"] = True
         if res.get("needs_review"):
             m.low_conf_regions += 1
         cell_texts[(r, c)] = txt
@@ -617,6 +722,8 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
     model = T.build_table_model(table_id, grid_abs, cell_texts, cell_confs,
                                 ",".join(sorted(engines_used)) or "tesseract",
                                 cell_needs_review)
+    for cell in model['cells']:
+        cell['raw_ocr_text'] = original_readings.get((cell['row'], cell['column']), '')
     return model
 
 
@@ -758,4 +865,4 @@ def build_txt(pages: list[dict]) -> str:
             parts.append(f"\nجدول {t['table_id']} ({t['rows']}×{t['columns']}):")
             parts.append(t["markdown"])
         parts.append("")
-    return "\n".join(parts).strip() + "\n"
+    return E.display_text("\n".join(parts)) + "\n"

@@ -6,12 +6,13 @@ import csv
 import html
 import io
 import json as _json
+import re
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .engines import normalize_text
+from .engines import display_text, en_digits_only
 
 
 def cell_bboxes(grid: tuple) -> list[tuple[int, int, tuple]]:
@@ -103,11 +104,13 @@ def build_table_model(table_id: int, grid: tuple, cell_texts: dict,
             "column_span": 1,
             "bbox": list(bbox),
             "raw_text": raw,
-            "normalized_text": normalize_text(raw),
+            "normalized_text": display_text(raw),
+            "normalized_en_digits": en_digits_only(display_text(raw)),
             "confidence": cell_confs.get((r, c)),
             "engine": engine,
             "language_estimate": "fa" if any("\u0600" <= ch <= "\u06FF" for ch in raw) else "en",
-            "digit_type": digit_type(raw),
+            "digit_type": digit_type(display_text(raw)),
+            "raw_digit_type": digit_type(raw),
             "needs_review": review,
         })
     return {
@@ -129,7 +132,12 @@ def rows_of(table: dict) -> list[list[str]]:
 
 def to_csv(table: dict) -> str:
     buf = io.StringIO()
-    csv.writer(buf).writerows(rows_of(table))
+    def spreadsheet_text(value):
+        probe = value.lstrip()
+        if probe.startswith(('=', '+', '-', '@')) and not re.fullmatch(r'[-+]?[\d,٬٫.]+%?', probe):
+            return "'" + value
+        return value
+    csv.writer(buf).writerows([spreadsheet_text(value) for value in row] for row in rows_of(table))
     return buf.getvalue()
 
 
@@ -150,8 +158,10 @@ def to_xlsx(table: dict, path: Path) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = f"table_{table['table_id']}"
-    for row in rows_of(table):
-        ws.append(row)
+    for row_index, row in enumerate(rows_of(table), 1):
+        for column, value in enumerate(row, 1):
+            cell = ws.cell(row_index, column, value)
+            cell.data_type = 's'  # OCR content is text, never an executable formula.
     wb.save(path)
 
 
