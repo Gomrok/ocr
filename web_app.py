@@ -20,6 +20,7 @@ import uuid
 import zipfile
 from collections import deque
 from datetime import datetime, timedelta
+from functools import wraps
 from pathlib import Path
 
 import pymupdf
@@ -27,6 +28,7 @@ from flask import Flask, g, jsonify, render_template, request, send_file, sessio
 
 from ocr_pipeline.pipeline import process_pdf
 from ocr_pipeline.engines import TesseractEngine
+from ocr_pipeline.review import ReviewConflict, ReviewStore
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # سقف ۵۰۰ مگابایت
@@ -43,7 +45,13 @@ app.config.update(
         "OCR_ALLOWED_HOSTS", "127.0.0.1,localhost,ocr.gomrok.org").split(",") if host.strip()],
 )
 
-DATA_DIR = Path(os.environ.get("OCR_DATA_DIR") or Path(__file__).resolve().parent)
+_configured_data = os.environ.get("OCR_DATA_DIR")
+if not _configured_data or not Path(_configured_data).is_absolute():
+    raise RuntimeError("An explicit absolute OCR_DATA_DIR is required before importing the web app")
+DATA_DIR = Path(_configured_data).resolve()
+_release_dir = Path(__file__).resolve().parent
+if DATA_DIR == Path(DATA_DIR.anchor) or DATA_DIR == _release_dir or _release_dir in DATA_DIR.parents:
+    raise RuntimeError("OCR_DATA_DIR must be private storage outside the release directory")
 UPLOAD_DIR = DATA_DIR / "uploads"
 OUT_DIR = DATA_DIR / "output"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,9 +69,32 @@ MAX_BATCH_PAGES = 300
 DPI_LEVELS = (100, 250, 500, 1000, 1500, 2000)
 DEFAULT_DPI = 2000
 PREVIEW_SLOTS = threading.BoundedSemaphore(2)
+REVIEW_SLOTS = threading.BoundedSemaphore(2)
 MAX_PREVIEW_EDGE = 1400
 MAX_PREVIEW_TEXT_BYTES = 4 * 1024 * 1024
 MAX_PREVIEW_TEXT_CHARS = 30_000
+PIPELINE_MODE = os.environ.get("OCR_PIPELINE_MODE", "legacy")
+if PIPELINE_MODE not in ("legacy", "compare", "candidate"):
+    raise RuntimeError("Unknown OCR_PIPELINE_MODE")
+
+
+def _review_store():
+    return ReviewStore(DATA_DIR / "reviews")
+
+
+def _bounded_review(function):
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        if not REVIEW_SLOTS.acquire(blocking=False):
+            return jsonify(error="بازبینی در حال ذخیره یا دریافت است. کمی بعد تلاش کنید."), 503
+        try:
+            return function(*args, **kwargs)
+        except OSError:
+            app.logger.exception("Review storage operation failed")
+            return jsonify(error="دسترسی به فضای بازبینی انجام نشد. دوباره تلاش کنید."), 503
+        finally:
+            REVIEW_SLOTS.release()
+    return guarded
 
 
 @app.before_request
@@ -176,9 +207,16 @@ def _finish_document(job_id: str, document_index: int, outcome: str,
             summary["outputs"] = outputs
 
 
-def _collect_outputs(stem_dir: Path, stem: str) -> list[str]:
+def _collect_outputs(stem_dir: Path, stem: str, *, extraction_revision=None) -> list[str]:
     """نسبی: TXT + JSON + جدول‌ها + دیباگ این سند."""
     names = [f"{stem}/{stem}.txt", f"{stem}/{stem}.json"]
+    revision = extraction_revision
+    if isinstance(revision, str) and re.fullmatch(r"[a-f0-9]{24}", revision):
+        # Table exports are from this exact extraction; earlier revisions remain private.
+        directory = stem_dir / "extractions" / revision / "tables"
+        if directory.is_dir():
+            names.extend(f"{stem}/extractions/{revision}/tables/{path.name}" for path in sorted(directory.iterdir()) if path.is_file())
+        return names
     for sub in ("tables", "debug"):
         d = stem_dir / sub
         if d.is_dir():
@@ -210,7 +248,15 @@ def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
                 try:
                     result = process_pdf(pdf_path, out_dir, dpi=dpi,
                                          force_tesseract=os.environ.get("OCR_TESSERACT_ONLY") == "1",
-                                         progress_cb=cb)
+                                         progress_cb=cb, mode=PIPELINE_MODE,
+                                         candidate_options=_candidate_options(JOBS[job_id].get("candidate_settings", {})))
+                    candidate_revision = result.get("extraction_revision") or result.get("comparison", {}).get("extraction_revision")
+                    if candidate_revision:
+                        import json
+                        snapshot = out_dir / "extractions" / candidate_revision
+                        payload = result if result.get("extraction_revision") else json.loads((snapshot / "extraction.json").read_text("utf-8"))
+                        _review_store().register(JOBS[job_id]["owner_id"], payload, snapshot,
+                                                 display_name=JOBS[job_id]["documents"][pdf_path.name])
                     if result["performance"]["failed_pages"] == result["document"]["pages"]:
                         _finish_document(job_id, idx, "error")
                         continue
@@ -220,7 +266,7 @@ def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
                     with LOCK:
                         JOBS[job_id]["log"].append("پردازش این سند انجام نشد. لطفاً قالب و محتوای فایل را بررسی نمایید.")
                     continue
-                names = _collect_outputs(out_dir, stem)
+                names = _collect_outputs(out_dir, stem, extraction_revision=result.get("extraction_revision"))
                 _finish_document(job_id, idx, "done", names)
                 with LOCK:
                     JOBS[job_id]["files"].extend(names)
@@ -255,6 +301,14 @@ def _run_job(job_id: str, pdf_paths: list[Path], dpi: int):
         QUEUE_SLOTS.release()
 
 
+def _candidate_options(settings):
+    if PIPELINE_MODE == "legacy":
+        return None
+    from ocr_pipeline.precision.profiles import Options
+    return Options(profile=settings.get("profile", "persian"), dpi=settings.get("candidate_dpi", 300),
+                   handwriting=settings.get("handwriting", False))
+
+
 @app.get("/")
 def index():
     session.setdefault("owner_id", uuid.uuid4().hex)
@@ -262,7 +316,7 @@ def index():
     session.permanent = True
     return render_template("dashboard.html", csrf_token=session["csrf_token"],
                            dpi_levels=DPI_LEVELS, default_dpi=DEFAULT_DPI,
-                           csp_nonce=g.csp_nonce)
+                           csp_nonce=g.csp_nonce, pipeline_mode=PIPELINE_MODE)
 
 
 @app.get("/healthz")
@@ -301,10 +355,26 @@ def upload():
         fs = request.files.getlist("pdfs")
         if not fs or len(fs) > 100:
             return jsonify(error="در هر نوبت از یک تا ۱۰۰ فایل PDF انتخاب نمایید."), 400
+        image_signatures = {".png": (b"\x89PNG\r\n\x1a\n",), ".jpg": (b"\xff\xd8\xff",), ".jpeg": (b"\xff\xd8\xff",),
+                            ".tif": (b"II*\x00", b"MM\x00*"), ".tiff": (b"II*\x00", b"MM\x00*"), ".bmp": (b"BM",)}
         for file in fs:
-            if not file.filename or not file.filename.lower().endswith(".pdf") or file.stream.read(5) != b"%PDF-":
-                return jsonify(error="فقط فایل PDF معتبر قابل پردازش است."), 400
+            suffix = Path(file.filename or "").suffix.lower()
+            signature = file.stream.read(8)
+            valid_pdf = suffix == ".pdf" and signature.startswith(b"%PDF-")
+            valid_image = PIPELINE_MODE == "candidate" and suffix in image_signatures and signature.startswith(image_signatures[suffix])
+            if not valid_pdf and not valid_image:
+                return jsonify(error="فایل PDF یا تصویر معتبر انتخاب کنید." if PIPELINE_MODE == "candidate" else "فقط فایل PDF معتبر قابل پردازش است."), 400
             file.stream.seek(0)
+        candidate_settings = {}
+        if PIPELINE_MODE != "legacy":
+            allowed = {"profile": ("persian", "mixed", "english"), "candidate_dpi": ("300", "400"), "handwriting": ("0", "1")}
+            for field, values_allowed in allowed.items():
+                submitted = request.form.getlist(field)
+                if len(submitted) > 1 or (submitted and submitted[0] not in values_allowed):
+                    return jsonify(error="تنظیمات مسیر آزمایشی معتبر نیست."), 400
+            candidate_settings = {"profile": request.form.get("profile", "persian"),
+                                  "candidate_dpi": int(request.form.get("candidate_dpi", "300")),
+                                  "handwriting": request.form.get("handwriting", "0") == "1"}
         values = request.form.getlist("dpi")
         if len(values) > 1 or (values and values[0] not in {str(value) for value in DPI_LEVELS}):
             return jsonify(error="وضوح پردازش باید یکی از مقادیر ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ یا ۲۰۰۰ DPI باشد."), 400
@@ -314,16 +384,26 @@ def upload():
         file_statuses = []
         pages = 0
         for index, file in enumerate(fs, 1):
-            path = UPLOAD_DIR / f"{job_id}_{index:03d}.pdf"
+            suffix = Path(file.filename).suffix.lower()
+            path = UPLOAD_DIR / f"{job_id}_{index:03d}{suffix}"
             saved.append(path)
             file.save(path)
             try:
-                with pymupdf.open(path) as document:
-                    if document.needs_pass or document.page_count == 0:
-                        return jsonify(error="فایل رمزگذاری‌شده یا بدون صفحه قابل پردازش نیست."), 400
-                    page_count = document.page_count
+                if suffix != ".pdf":
+                    from ocr_pipeline.precision.imaging import SourcePages
+                    with SourcePages(path, _candidate_options(candidate_settings)) as document:
+                        page_count = document.count
+                        for number in range(page_count):
+                            document.document.seek(number)
+                            document._check_dimensions(*document.document.size)
                     pages += page_count
-            except (RuntimeError, ValueError):
+                else:
+                    with pymupdf.open(path) as document:
+                        if document.needs_pass or document.page_count == 0:
+                            return jsonify(error="فایل رمزگذاری‌شده یا بدون صفحه قابل پردازش نیست."), 400
+                        page_count = document.page_count
+                        pages += page_count
+            except (OSError, RuntimeError, ValueError):
                 return jsonify(error="ساختار فایل PDF معتبر نیست."), 400
             if pages > MAX_BATCH_PAGES:
                 return jsonify(error="مجموع صفحات هر نوبت نباید از ۳۰۰ صفحه بیشتر باشد."), 400
@@ -342,6 +422,7 @@ def upload():
                 "state": "running", "log": [], "pages_total": pages, "pages_done": 0,
                 "failed_pages": 0, "review_pages": 0, "files": [], "zip": None, "file_index": 0,
                 "file_count": len(saved), "started": datetime.now().isoformat(timespec="seconds"),
+                "candidate_settings": candidate_settings,
                 "started_monotonic": time.monotonic(),
             }
         threading.Thread(target=_run_job, args=(job_id, saved, dpi), daemon=True).start()
@@ -384,7 +465,7 @@ def _owned_document(job_id: str, document_index: int, page_number: int):
         if document_index > len(summaries):
             return None
         summary = dict(summaries[document_index - 1])
-        source_name = f"{job_id}_{document_index:03d}.pdf"
+        source_name = next((name for name in job["documents"] if Path(name).stem == summary["id"]), "")
         if source_name not in job["documents"] or page_number > summary["page_count"]:
             return None
     return summary, source_name
@@ -402,6 +483,19 @@ def preview_page(job_id: str, document_index: int, page_number: int):
     if not PREVIEW_SLOTS.acquire(blocking=False):
         return jsonify(error="پیش‌نمایش در حال آماده‌سازی است. دوباره تلاش کنید."), 503
     try:
+        if source.suffix.lower() != ".pdf":
+            from ocr_pipeline.precision.imaging import SourcePages
+            from ocr_pipeline.precision.profiles import Options
+            import cv2
+            with SourcePages(source, Options()) as pages:
+                raster, _ = pages.read(page_number-1)
+                scale = min(1., MAX_PREVIEW_EDGE / max(raster.shape))
+                if scale < 1:
+                    raster = cv2.resize(raster, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                success, encoded = cv2.imencode(".png", raster)
+                if not success:
+                    raise OSError("Preview encoding failed")
+            return send_file(io.BytesIO(encoded.tobytes()), mimetype="image/png")
         with pymupdf.open(source) as document:
             page = document[page_number - 1]
             bounds = page.rect
@@ -469,6 +563,69 @@ def download(job_id: str, name: str):
     if not p.is_file() or OUT_DIR.resolve() not in p.parents:
         return "یافت نشد", 404
     return send_file(p, as_attachment=True)
+
+
+@app.get("/reviews")
+def review_workspace():
+    if not session.get("owner_id"):
+        return "یافت نشد", 404
+    return render_template("review.html", csrf_token=session["csrf_token"], csp_nonce=g.csp_nonce)
+
+
+@app.get("/reviews/data")
+@_bounded_review
+def review_documents():
+    if not session.get("owner_id"):
+        return jsonify(error="یافت نشد"), 404
+    return jsonify(documents=_review_store().list_documents(session["owner_id"]))
+
+
+@app.route("/reviews/<document_id>", methods=["GET", "POST"])
+@_bounded_review
+def review_document(document_id):
+    owner = session.get("owner_id")
+    if not owner:
+        return jsonify(error="یافت نشد"), 404
+    try:
+        store = _review_store()
+        current = store.get(owner, document_id)  # Ownership checked before mutation.
+        if request.method == "GET":
+            return jsonify(current)
+        request.max_content_length = 128 * 1024
+        body = request.get_json()
+        if not isinstance(body, dict) or set(body) - {"version", "changes", "reviewer", "activate_revision"}:
+            return jsonify(error="ساختار درخواست معتبر نیست."), 400
+        return jsonify(store.save(owner, document_id, body.get("version"), body.get("changes", []),
+                                  reviewer=body.get("reviewer"), activate_revision=body.get("activate_revision")))
+    except ReviewConflict:
+        return jsonify(error="این سند در نشست دیگری تغییر کرده است. نسخهٔ تازه را دریافت کنید."), 409
+    except (FileNotFoundError, KeyError):
+        return jsonify(error="یافت نشد"), 404
+    except ValueError:
+        return jsonify(error="اطلاعات بازبینی معتبر نیست یا از حد مجاز بیشتر است."), 400
+
+
+@app.get("/reviews/<document_id>/pages/<int:page_number>")
+@_bounded_review
+def review_image(document_id, page_number):
+    try:
+        if not session.get("owner_id") or not 1 <= page_number <= MAX_BATCH_PAGES:
+            return "یافت نشد", 404
+        path = _review_store().image_path(session["owner_id"], document_id, page_number)
+        return send_file(path, mimetype="image/png", conditional=True)
+    except (FileNotFoundError, KeyError, ValueError):
+        return "یافت نشد", 404
+
+
+@app.get("/reviews/<document_id>/search")
+@_bounded_review
+def review_search_snapshot(document_id):
+    try:
+        if not session.get("owner_id"):
+            return jsonify(error="یافت نشد"), 404
+        return jsonify(_review_store().search_snapshot(session["owner_id"], document_id))
+    except (FileNotFoundError, KeyError, ValueError):
+        return jsonify(error="یافت نشد"), 404
 
 
 if __name__ == "__main__":

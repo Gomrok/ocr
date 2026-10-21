@@ -1,0 +1,14 @@
+.review-workspace{max-width:1500px;margin:0 auto;padding:28px;color:var(--navy)}
+.review-heading,.review-toolbar,.review-actions{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+.review-heading{justify-content:space-between}.review-toolbar label{display:flex;gap:8px;align-items:center}
+.review-workspace button,.review-workspace select,.review-workspace input{min-height:44px;font:inherit;border:1px solid #b8c8d9;border-radius:8px;padding:8px 12px;background:#fff;color:var(--navy)}
+.review-workspace a{color:#205dae;text-underline-offset:4px}.review-workspace :focus-visible{outline:3px solid #3675db;outline-offset:3px}
+.review-workspace button:disabled{opacity:.5;cursor:not-allowed}.review-workspace .primary-button{background:#087c76;color:#fff}
+.review-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:20px}.review-grid>.panel{padding:20px;min-width:0}
+.review-grid h2{font-size:18px;margin:0 0 16px}.review-image-scroll{max-height:78vh;overflow:auto;background:#e9edf2;border-radius:8px;padding:12px}
+#reviewCanvas{position:relative;width:100%;line-height:0}#reviewImage{display:block;width:100%;height:auto}#reviewOverlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#reviewBox{fill:#fbbf2420;stroke:#b66a00;stroke-width:4}.review-units{display:flex;flex-direction:column;gap:8px;max-height:35vh;overflow:auto;margin-bottom:18px}
+.review-unit{text-align:start;white-space:pre-wrap;overflow-wrap:anywhere}.review-unit[aria-pressed=true]{border:2px solid #087c76;background:#eefaf8}
+#reviewForm{display:grid;gap:14px}#reviewForm[hidden]{display:none}#reviewForm label{display:grid;gap:7px}#reviewForm textarea{font:inherit;width:100%;padding:12px;border:1px solid #b8c8d9;border-radius:8px;resize:vertical;unicode-bidi:plaintext}
+#reviewForm .review-checkbox{display:flex;align-items:center}.review-tabs{display:none}#reviewMessage{min-height:28px;color:#634514}#unitReasons{color:#634514;font-size:13px}
+@media(max-width:760px){.review-workspace{padding:16px}.review-heading h1{font-size:24px}.review-grid{display:block}.review-tabs{display:flex;gap:8px;margin-bottom:12px}.review-grid>.panel{display:none}.review-grid>.panel.is-active{display:block}.review-image-scroll{max-height:65vh}.review-toolbar{gap:10px}.review-toolbar label{width:100%;justify-content:space-between}.review-toolbar select{max-width:65%}.review-tabs button[aria-selected=true]{background:#e5f5f3}.review-actions button{width:100%}}

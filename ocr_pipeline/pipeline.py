@@ -955,12 +955,47 @@ def _debug_table_image(master: R.MasterPage, regions, tables, debug_dir: Path,
 def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
                 api_key: str | None = None, force_tesseract: bool = False,
                 max_pages: int = 0, debug: bool = True,
-                langs: str = "fas", progress_cb=None) -> dict:
+                langs: str = "fas", progress_cb=None, *, mode: str | None = None,
+                candidate_options=None, temp_root: Path | None = None) -> dict:
     """Own native workers and PDF handles, including exceptional exits."""
+    if api_key:
+        raise ValueError("External document APIs are disabled; use local Tesseract")
+    mode = mode or os.environ.get("OCR_PIPELINE_MODE", "legacy")
+    if mode not in ("legacy", "compare", "candidate"):
+        raise ValueError("Unknown OCR pipeline mode")
+    if mode == "candidate":
+        return _candidate_document(pdf_path, out_dir, candidate_options, temp_root,
+                                   max_pages, progress_cb, publish_exports=True)
     reuse = os.environ.get('OCR_PERSISTENT_ENGINE', '1') != '0'
     with E.TesseractEngine(langs, reuse_model=reuse) as local, pymupdf.open(pdf_path) as doc:
-        return _process_document(doc, local, pdf_path, out_dir, dpi, api_key,
-                                 force_tesseract, max_pages, debug, progress_cb)
+        payload = _process_document(doc, local, pdf_path, out_dir, dpi, api_key,
+                                    True, max_pages, debug, progress_cb)
+    if mode == "compare":
+        try:
+            candidate = _candidate_document(pdf_path, out_dir, candidate_options, temp_root,
+                                            max_pages, None, publish_exports=False)
+            payload["comparison"] = {"status": "completed", "extraction_revision": candidate["extraction_revision"],
+                                     "document_id": candidate["document"]["id"], "active_text_replaced": False}
+        except Exception as error:
+            payload["comparison"] = {"status": "failed", "error": type(error).__name__, "active_text_replaced": False}
+        (out_dir / "comparison.json").write_text(json.dumps(payload["comparison"], indent=2), encoding="utf-8")
+    return payload
+
+
+def _candidate_document(source, out_dir, options, temp_root, max_pages, callback, *, publish_exports):
+    from .precision.extraction import process_document
+    configured_temp = temp_root or os.environ.get("OCR_TEMP_DIR")
+    if not configured_temp:
+        raise ValueError("An explicit OCR_TEMP_DIR is required for experimental extraction")
+    result = process_document(source, out_dir, options=options, temp_root=Path(configured_temp),
+                              max_pages=max_pages, progress_cb=callback)
+    if publish_exports:
+        # These compatibility exports are copies of one immutable snapshot. No repeated OCR.
+        snapshot = out_dir / "extractions" / result["extraction_revision"]
+        for extension in ("txt", "json"):
+            import shutil
+            shutil.copyfile(snapshot / f"extraction.{extension}", out_dir / f"{source.stem}.{extension}")
+    return result
 
 
 def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
@@ -971,12 +1006,7 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
     master_dir = out_dir / "master"
     master_dir.mkdir(parents=True, exist_ok=True)
 
-    engine_list: list[E.OCREngine] = []
-    if not force_tesseract:
-        key = api_key or os_key()
-        if key:
-            engine_list.append(E.GoogleVisionEngine(key))
-    engine_list.append(local_engine)
+    engine_list: list[E.OCREngine] = [local_engine]
     engine = E.pick_engine(engine_list)
 
     n_pages = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
@@ -1045,14 +1075,6 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
                      "seconds": payload["performance"]["total_seconds"],
                      "txt": f"{stem}.txt", "json": f"{stem}.json"})
     return payload
-
-
-def os_key() -> str | None:
-    key = os.environ.get("GOOGLE_API_KEY")
-    if key:
-        return key
-    p = Path(__file__).resolve().parent.parent / "api_key.txt"
-    return p.read_text().strip() if p.is_file() else None
 
 
 def build_txt(pages: list[dict]) -> str:

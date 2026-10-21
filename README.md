@@ -1,7 +1,7 @@
 # 🤖 ربات OCR فارسی — Production Pipeline (مستر 2000 DPI)
 
 پایپ‌لاین OCR تولیدی فارسی با **رندر مستر 2000 DPI**، معماری ناحیه‌محورِ حافظه‌امن،
-جدول‌خوانی سلول‌به‌سلول، fallback چندموتوره (Google Vision → Tesseract) و
+جدول‌خوانی سلول‌به‌سلول، پردازش کاملاً محلی با Tesseract و
 گذرهای تخصصی ارقام (فارسی/انگلیسی/مخلوط RTL-LTR).
 
 ## 🏗️ معماری
@@ -17,7 +17,7 @@ PDF ──▶ render.py      رندر مستر 2000DPI (TIFF lossless + metadata
     ──▶ tables.py      شبکهٔ جدول، برش سلول از مستر، strip_grid_lines، مدل منطقی جدول
                        (row/col/span/bbox/raw/normalized/conf/engine/digit_type/needs_review)
                        + خروجی JSON/CSV/HTML/XLSX/Markdown (بخش ۹ تا ۱۱)
-    ──▶ engines.py     GoogleVisionEngine + TesseractEngine (docker ocr-tesseract:fa)
+    ──▶ engines.py     TesseractEngine محلی؛ مسیر OCR بیرونی غیرفعال
                        + ocr_any با fallback چندموتوره + بازیابی PSM + گذر ترمیم eng
                        برای جزیره‌های لاتین + بازسازی BiDi سطرها (بخش ۴ تا ۷ و ۱۴ و ۱۵)
     ──▶ pipeline.py    ارکستراتور: OCR ناحیه‌ای با رأی‌گیری چندمقیاسی، جدول سلول‌به‌سلول،
@@ -41,10 +41,16 @@ docker build -f docker/tesseract.Dockerfile -t ocr-tesseract:fa .
 # مدل‌های fas و eng همراه پروژه در tessdata/ قرار دارند
 ```
 
-## 🔑 Google Vision (اختیاری)
+## مسیر آزمایشی جدید؛ هنوز تأیید نشده
 
-کلید `AIza...` را در `api_key.txt` بگذارید یا `GOOGLE_API_KEY` را ست کنید.
-در شبکه‌های بسته (HTTP 403) موتور خودکار غیرفعال و **fallback به Tesseract** انجام می‌شود.
+تنها موتور فعال Tesseract است؛ ارسال سند به API پردازش بیرونی حذف شده است.
+APIهای HTTP خود سامانه برای بارگذاری، وضعیت، دانلود و بازبینی همچنان برقرارند.
+پیش‌فرض `OCR_PIPELINE_MODE=legacy` حفظ شده است. مسیرهای `compare` و `candidate`
+برای ارزیابی محدود، خروجی قابل ردیابی و بازبینی انسانی افزوده شده‌اند.
+
+در ارزیابی موقت پنج صفحه، خطای مسیر نامزد بیشتر بود؛ کیفیت خودکار آن پذیرفته
+نشده و روی سایت فعال نشده است. وضعیت مرجع، آزمون‌ها، محدودیت‌ها، نحوهٔ اجرا و
+بازگشت در [گزارش Tesseract](docs/TESSERACT_ROADMAP.md) آمده است.
 
 ## 🚀 اجرا
 

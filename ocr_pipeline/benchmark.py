@@ -3,33 +3,18 @@
 from __future__ import annotations
 
 import re
-
-
-def _levenshtein(a: str, b: str) -> int:
-    if len(a) < len(b):
-        a, b = b, a
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        cur = [i]
-        for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[-1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
-    return prev[-1]
+from .evaluation import edit_counts
 
 
 def cer(ref: str, hyp: str) -> float:
-    ref_n = re.sub(r"\s+", "", ref)
-    hyp_n = re.sub(r"\s+", "", hyp)
-    if not ref_n:
-        return 0.0 if not hyp_n else 1.0
-    return _levenshtein(ref_n, hyp_n) / len(ref_n)
+    counts = edit_counts(ref.replace("\r\n", "\n"), hyp.replace("\r\n", "\n"))
+    return counts["fraction"] if counts["N"] else (0.0 if not hyp else float("inf"))
 
 
 def wer(ref: str, hyp: str) -> float:
     r, h = ref.split(), hyp.split()
-    if not r:
-        return 0.0 if not h else 1.0
-    return _levenshtein(" ".join(r), " ".join(h)) / max(len(r), 1)
+    counts = edit_counts(r, h)
+    return counts["fraction"] if counts["N"] else (0.0 if not h else float("inf"))
 
 
 _NUM_RE = re.compile(r"[\d۰-۹٠-٩][\d۰-۹٠-٩,./×\-]*")
@@ -40,16 +25,11 @@ def numeric_tokens(text: str) -> list[str]:
 
 
 def numeric_accuracy(ref: str, hyp: str) -> float:
-    """دقت اعداد: تطبیق ترتیبی توکن‌های عددی پس از نرمال‌سازی ارقام."""
-    fa2en = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
-    r = [t.translate(fa2en).replace(",", "").replace("٬", "")
-         for t in numeric_tokens(ref)]
-    h = [t.translate(fa2en).replace(",", "").replace("٬", "")
-         for t in numeric_tokens(hyp)]
-    if not r:
-        return 1.0
-    match = sum(1 for x in r if x in h)
-    return match / len(r)
+    """Deprecated diagnostic only; use location-linked numeric_field_metrics for acceptance."""
+    r, h = numeric_tokens(ref), numeric_tokens(hyp)
+    if not r and not h:
+        return float("nan")
+    return sum(a == b for a, b in zip(r, h)) / max(len(r), len(h))
 
 
 def table_accuracy(ref_rows: list[list[str]], got_rows: list[list[str]]) -> dict:

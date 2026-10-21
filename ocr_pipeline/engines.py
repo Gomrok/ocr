@@ -2,14 +2,13 @@
 """لایهٔ انتزاع موتور OCR + fallback چندموتوره + نرمال‌سازی + شناسه‌ها (بخش ۴ تا ۷ و ۱۵ و ۱۹).
 
 موتورها:
-  GoogleVisionEngine  — DOCUMENT_TEXT_DETECTION با کلید API (REST)
+  GoogleVisionEngine  — نماد سازگاری غیرفعال؛ بدون ارتباط شبکه
   TesseractEngine     — fas داخل داکر، PSM انتخابی بر اساس نوع ناحیه
 
 خروجی استاندارد: dict کلمات + متن + اطمینان (بدون جعل اطمینان — بخش ۱۸).
 """
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import json
@@ -17,12 +16,9 @@ import logging
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import tempfile
 import threading
-import time
-import urllib.request
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -30,19 +26,10 @@ from pathlib import Path
 
 from .native_pool import NativePool
 
-VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
 TESSERACT_IMAGE = "ocr-tesseract:fa"
 
 CONF_ACCEPT = 0.90      # بخش ۱۹
 CONF_RETRY = 0.75
-
-
-def _ssl_ctx():
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
 
 
 # ───────────────────── نرمال‌سازی (بخش ۴ و ۶) ─────────────────────
@@ -552,67 +539,15 @@ def merge_latin_secondary(fas_words: list[dict],
 
 
 class GoogleVisionEngine(OCREngine):
-    name = "google_vision"
+    """Disabled compatibility symbol. No network implementation or credentials retained."""
+    name = "disabled_external_ocr"
+    available = False
 
     def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.available = True  # تا اولین شکست واقعی
+        pass
 
-    def ocr_image(self, png: bytes, psm: int = 3,
-                  whitelist: str | None = None) -> dict:
-        if not self.available:
-            raise RuntimeError("Google Vision is unavailable")
-        body = {"requests": [{
-            "image": {"content": base64.b64encode(png).decode("ascii")},
-            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-            "imageContext": {"languageHints": ["fa", "en"]},
-        }]}
-        req = urllib.request.Request(
-            f"{VISION_URL}?key={self.api_key}",
-            data=json.dumps(body).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
-        last = None
-        for i in range(2):  # حداکثر ۲ تلاش (~۳ ثانیه) — fallback سریع به موتور بعدی
-            try:
-                with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as r:
-                    payload = json.load(r)
-                r0 = payload["responses"][0]
-                if "error" in r0:
-                    raise RuntimeError(r0["error"].get("message", "?"))
-                return self._parse(r0)
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                if i < 1:
-                    time.sleep(1)
-        self.available = False  # کل موتور غیرفعال می‌شود (صفحات بعدی مستقیم Tesseract)
-        raise RuntimeError(f"google_vision failed: {last}")
-
-    @staticmethod
-    def _parse(r0: dict) -> dict:
-        words: list[dict] = []
-        fta = r0.get("fullTextAnnotation") or {}
-        for page in fta.get("pages", []):
-            for block in page.get("blocks", []):
-                for para in block.get("paragraphs", []):
-                    for w in para.get("words", []):
-                        conf = w.get("confidence")
-                        text = "".join(s.get("text", "") for s in w.get("symbols", []))
-                        box = w.get("boundingBox", {}).get("vertices", [])
-                        if len(box) == 4 and text:
-                            xs = [v.get("x", 0) for v in box]
-                            ys = [v.get("y", 0) for v in box]
-                            words.append({
-                                "text": text,
-                                "bbox": (min(xs), min(ys), max(xs), max(ys)),
-                                "confidence": conf,
-                            })
-        page0 = (fta.get("pages") or [{}])[0]
-        return {
-            "text": fta.get("text", ""),
-            "words": words,
-            "confidence": page0.get("confidence"),
-            "engine": "google_vision",
-        }
+    def ocr_image(self, *_args, **_kwargs):
+        raise RuntimeError("External document APIs are disabled")
 
 
 class TesseractEngine(OCREngine):
@@ -781,7 +716,7 @@ class TesseractEngine(OCREngine):
                 cmd = [self.executable, tmp_in, base]
                 data_path = str(self.tessdata_dir.resolve())
             else:
-                cmd = ["docker", "run", "--rm",
+                cmd = ["docker", "run", "--rm", "--pull=never",
                        "-v", f"{tmp_in}:/tmp/page.png:ro",
                        "-v", f"{outdir}:/io",
                        "-v", f"{self.tessdata_dir.resolve()}:/tessdata:ro",

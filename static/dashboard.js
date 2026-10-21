@@ -3,6 +3,7 @@
 
   const byId = (id) => document.getElementById(id);
   const workspace = byId('workspace');
+  const candidateMode = workspace.dataset.pipelineMode === 'candidate';
   const dpiLevels = workspace.dataset.dpiLevels.split(',').map(Number);
   const number = (value) => new Intl.NumberFormat('fa-IR').format(value);
   const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
@@ -94,8 +95,9 @@
     if (activeJob || uploadBusy) return;
     const next = Array.from(incoming);
     if (files.length + next.length > 100) { showError('در هر نوبت حداکثر ۱۰۰ فایل PDF انتخاب کنید.'); return; }
-    if (next.some((file) => !file.name.toLowerCase().endsWith('.pdf'))) {
-      showError('فقط فایل PDF پذیرفته می‌شود.'); return;
+    const allowed = candidateMode ? /\.(pdf|png|jpe?g|tiff?|bmp)$/i : /\.pdf$/i;
+    if (next.some((file) => !allowed.test(file.name))) {
+      showError(candidateMode ? 'قالب فایل پشتیبانی نمی‌شود.' : 'فقط فایل PDF پذیرفته می‌شود.'); return;
     }
     if (files.reduce((sum, file) => sum + file.size, 0) + next.reduce((sum, file) => sum + file.size, 0) > 500 * 1048576) {
       showError('مجموع حجم فایل‌ها از ۵۰۰ مگابایت بیشتر است.'); return;
@@ -157,13 +159,18 @@
     const data = new FormData();
     for (const file of files) data.append('pdfs', file);
     data.append('dpi', dpiLevels[Number(byId('dpiControl').value)]);
+    if (byId('candidateProfile')) {
+      data.append('profile', byId('candidateProfile').value);
+      data.append('candidate_dpi', byId('candidateDpi').value);
+      data.append('handwriting', byId('candidateHandwriting').checked ? '1' : '0');
+    }
     try {
       const response = await fetch('/upload', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}, body: data, credentials: 'same-origin'});
       const body = await readJson(response);
       if (!response.ok || !body.job_id) throw new Error(body.error || 'بارگذاری انجام نشد. دوباره تلاش کنید.');
       activeJob = body.job_id;
       byId('dpiControl').disabled = true;
-      byId('runDpi').textContent = `${number(body.dpi)} DPI`;
+      byId('runDpi').textContent = `${number(candidateMode ? Number(byId('candidateDpi').value) : body.dpi)} DPI`;
       await fetchStatus();
     } catch (error) {
       showError(error.message || 'ارتباط با سرور برقرار نشد.');

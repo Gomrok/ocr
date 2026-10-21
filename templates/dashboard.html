@@ -38,6 +38,7 @@
         <span><strong>سامانهٔ پردازش اسناد</strong><small>استخراج متن فارسی و انگلیسی</small></span>
       </div>
       <nav class="side-nav" aria-label="بخش‌های فضای کار">
+        {% if pipeline_mode != 'legacy' %}<a class="nav-link" href="/reviews"><span>بازبینی متن و تأیید</span></a>{% endif %}
         <a class="nav-link is-active" href="#workspace" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-document"></use></svg><span>استخراج متن</span></a>
         <a class="nav-link" href="#selection"><svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg><span>فایل‌های این نوبت</span><small class="nav-count" id="navCount">۰</small></a>
         <a class="nav-link" href="#results"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg><span>خروجی‌ها</span><small class="nav-count" id="navResults">۰</small></a>
@@ -53,7 +54,7 @@
         <button class="help-button" type="button" id="openHelp"><svg class="icon" aria-hidden="true"><use href="#i-help"></use></svg>راهنمای استفاده</button>
       </header>
 
-      <main class="content" id="workspace" tabindex="-1" data-dpi-levels="{{ dpi_levels|join(',') }}" data-default-dpi="{{ default_dpi }}">
+      <main class="content" id="workspace" tabindex="-1" data-dpi-levels="{{ dpi_levels|join(',') }}" data-default-dpi="{{ default_dpi }}" data-pipeline-mode="{{ pipeline_mode }}">
         <header class="page-heading">
           <div><p class="eyebrow">فضای کار اسناد</p><h1>فضای کار استخراج متن</h1><p class="page-subtitle">از انتخاب سند تا دریافت متن و جدول، مراحل پردازش را در یک صفحه دنبال کنید.</p></div>
           <span class="local-badge">پردازش محلی سند</span>
@@ -70,7 +71,7 @@
           <section class="panel batch-panel" aria-labelledby="uploadHeading">
             <div class="panel-heading"><div><p class="panel-kicker">مرحلهٔ نخست</p><h2 id="uploadHeading">اسناد این نوبت</h2></div><span class="count-badge" id="selectionCount">۰ فایل</span></div>
             <form id="f" novalidate>
-              <input class="sr-only" type="file" id="file" accept=".pdf,application/pdf" multiple tabindex="-1" aria-label="انتخاب فایل‌های PDF">
+              <input class="sr-only" type="file" id="file" accept="{% if pipeline_mode == 'candidate' %}.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp{% else %}.pdf,application/pdf{% endif %}" multiple tabindex="-1" aria-label="انتخاب اسناد">
               <div class="drop" id="drop" role="button" tabindex="0" aria-controls="file" aria-describedby="uploadLimits" aria-label="انتخاب یا رها کردن فایل‌های PDF" aria-disabled="false">
                 <svg class="icon drop-icon" aria-hidden="true"><use href="#i-upload"></use></svg>
                 <div><strong>بارگذاری گروهی PDF</strong><span>فایل‌ها را اینجا رها کنید یا از دستگاه انتخاب کنید.</span></div>
@@ -83,7 +84,7 @@
                 <p class="selection-empty" id="selectionEmpty">هنوز فایلی انتخاب نشده است.</p>
                 <div class="file-list" id="flist" role="list" aria-label="فهرست فایل‌های این نوبت"></div>
               </section>
-              <div class="proposal-strip"><span class="proposal-tag">پیشنهادی</span><span><bdi dir="ltr" lang="en">JPG · PNG · TIFF · BMP</bdi>؛ پشتیبانی از تصویر در نسخهٔ بعدی</span></div>
+              {% if pipeline_mode == 'candidate' %}<p class="proposal-strip">مسیر آزمایشی: PDF، تصاویر JPG، PNG، TIFF چندصفحه‌ای و BMP؛ دقت این مسیر هنوز تأیید نشده است.</p>{% else %}<div class="proposal-strip"><span class="proposal-tag">پیشنهادی</span><span><bdi dir="ltr" lang="en">JPG · PNG · TIFF · BMP</bdi>؛ پشتیبانی از تصویر در نسخهٔ بعدی</span></div>{% endif %}
               <div class="form-footer"><p>استخراج متن پس از بارگذاری روی سرور آغاز می‌شود.</p><button class="primary-button" type="submit" id="go" disabled><span id="goLabel">شروع پردازش</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg></button></div>
             </form>
           </section>
@@ -91,10 +92,18 @@
           <section class="panel settings-panel" aria-labelledby="qualityHeading">
             <div class="panel-heading"><div><p class="panel-kicker">مرحلهٔ دوم</p><h2 id="qualityHeading">تنظیمات استخراج</h2></div><svg class="icon panel-icon" aria-hidden="true"><use href="#i-settings"></use></svg></div>
             <div class="mode-field"><span>حالت پردازش</span><strong>استخراج دقیق</strong></div>
-            <div class="language-field"><div><strong>زبان متن</strong><span class="proposal-tag">پیشنهادی</span></div><div class="language-choices" aria-label="انتخاب دستی زبان در دست توسعه است"><button type="button" disabled>فارسی</button><button type="button" disabled>انگلیسی</button><button type="button" disabled class="is-selected">ترکیبی</button></div><p>انتخاب دستی زبان پس از اتصال به موتور فعال می‌شود.</p></div>
+            {% if pipeline_mode != 'legacy' %}
+            <div class="language-field"><label for="candidateProfile">زبان مسیر آزمایشی</label><select id="candidateProfile"><option value="persian">فارسی</option><option value="mixed">فارسی و انگلیسی</option><option value="english">انگلیسی</option></select>
+              <label for="candidateDpi">وضوح مسیر آزمایشی</label><select id="candidateDpi"><option value="300">۳۰۰ DPI</option><option value="400">۴۰۰ DPI؛ نامزد مقایسه</option></select>
+              <label><input type="checkbox" id="candidateHandwriting">سند دارای دست‌نویس است</label>
+              <p>این مسیر هنوز اعتبارسنجی نشده است. همهٔ نواحی پیش از ورود به خروجی جست‌وجو به تأیید انسان نیاز دارند.</p>
+              {% if pipeline_mode == 'compare' %}<p>مسیر فعلی خروجی اصلی را تولید می‌کند؛ خوانش آزمایشی جدا ذخیره می‌شود.</p>{% endif %}
+            </div>
+            {% else %}<div class="language-field"><div><strong>زبان متن</strong><span class="proposal-tag">پیشنهادی</span></div><div class="language-choices" aria-label="انتخاب دستی زبان در دست توسعه است"><button type="button" disabled>فارسی</button><button type="button" disabled>انگلیسی</button><button type="button" disabled class="is-selected">ترکیبی</button></div><p>انتخاب دستی زبان پس از اتصال به موتور فعال می‌شود.</p></div>{% endif %}
             <details class="advanced-settings" id="advancedSettings" open>
               <summary>تنظیمات پیشرفته</summary>
               <div class="quality-heading"><label for="dpiControl">وضوح رندر</label><output id="dpiValue" for="dpiControl" dir="ltr">۲۰۰۰ DPI</output></div>
+              {% if pipeline_mode == 'candidate' %}<p>کنترل شش‌مرحله‌ای زیر مخصوص مسیر فعلی است؛ در مسیر آزمایشی مقدار ۳۰۰ یا ۴۰۰ انتخاب‌شده در بالا اعمال می‌شود.</p>{% endif %}
               <div class="quality-control" id="qualityControl">
                 <input id="dpiControl" type="range" min="0" max="{{ dpi_levels|length - 1 }}" step="1" value="{{ dpi_levels.index(default_dpi) }}" dir="ltr" aria-valuetext="۲۰۰۰ DPI، سطح ۶ از ۶" aria-describedby="qualityHint qualityScale">
                 <div class="quality-stops" id="dpiStops" dir="ltr" aria-hidden="true">{% for dpi in dpi_levels %}<span data-dpi="{{ dpi }}">{{ dpi }}</span>{% endfor %}</div>

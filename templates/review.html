@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}"><title>بازبینی استخراج سند</title>
+  <link rel="stylesheet" href="/static/dashboard.css"><link rel="stylesheet" href="/static/review.css">
+  <script defer nonce="{{ csp_nonce }}" src="/static/review.js"></script>
+</head>
+<body>
+  <main class="review-workspace">
+    <header class="review-heading"><div><p class="eyebrow">تأیید انسانی سند</p><h1>بازبینی استخراج متن</h1></div><a href="/">بازگشت به بارگذاری</a></header>
+    <p>این مسیر آزمایشی است. متن تأییدنشده در خروجی مخصوص جست‌وجو قرار نمی‌گیرد. اتصال به نمایهٔ جست‌وجو هنوز برقرار نیست.</p>
+    <div class="review-toolbar"><label>سند <select id="reviewDocument"><option value="">انتخاب سند</option></select></label>
+      <label>نام بازبین<input id="reviewerName" maxlength="120" required autocomplete="name"></label>
+      <label>نسخهٔ استخراج <select id="extractionRevision" disabled></select></label>
+      <button type="button" id="activateRevision" disabled>فعال‌کردن نسخهٔ انتخابی</button>
+      <button type="button" id="reloadReview">دریافت نسخهٔ تازه</button>
+      <a id="searchExport" hidden download="approved-search.json">دریافت متن تأییدشده برای جست‌وجو</a>
+    </div>
+    <p id="reviewMessage" role="status" aria-live="polite">سندی برای بازبینی انتخاب نشده است.</p>
+    <div class="review-toolbar"><label>صفحه <select id="reviewPage" disabled></select></label>
+      <label>بزرگ‌نمایی <select id="reviewZoom"><option value="100">۱۰۰٪</option><option value="150">۱۵۰٪</option><option value="200">۲۰۰٪</option></select></label>
+      <button type="button" id="nextUnreviewed" disabled>مورد بعدی نیازمند بازبینی</button>
+      <span id="reviewCount"></span>
+    </div>
+    <div class="review-tabs" role="tablist" aria-label="نمای سند"><button id="reviewImageTab" role="tab" aria-controls="reviewImagePane" aria-selected="true">تصویر اصلی</button><button id="reviewTextTab" role="tab" aria-controls="reviewTextPane" aria-selected="false" tabindex="-1">متن و بازبینی</button></div>
+    <div class="review-grid">
+      <section class="panel review-image-pane is-active" id="reviewImagePane" role="tabpanel" aria-labelledby="reviewImageTab">
+        <h2>صفحهٔ کامل و محل ناحیه</h2>
+        <div class="review-image-scroll"><div id="reviewCanvas"><img id="reviewImage" alt="تصویر مرجع پیش از پردازش"><svg id="reviewOverlay" aria-hidden="true"><rect id="reviewBox"></rect></svg></div></div>
+      </section>
+      <section class="panel review-text-pane" id="reviewTextPane" role="tabpanel" aria-labelledby="reviewTextTab">
+        <h2>سطرها و سلول‌ها</h2><div id="reviewUnits" class="review-units"></div>
+        <form id="reviewForm" hidden>
+          <p id="unitReasons"></p><label>مشاهدهٔ اولیهٔ موتور<textarea id="observedText" rows="2" readonly></textarea></label>
+          <label>خوانش‌های ثبت‌شده<select id="alternativeText"><option value="">مشاهدهٔ نامزدها</option></select></label>
+          <label>متن پس از بازبینی<textarea id="verifiedText" rows="4" maxlength="10000" dir="auto"></textarea></label>
+          <label class="review-checkbox"><input id="handwritingFlag" type="checkbox">این ناحیه دست‌نویس است</label>
+          <div class="review-actions"><button class="primary-button" type="submit" id="approveUnit">تأیید متن و ذخیره</button>
+            <button type="button" id="unreadableUnit">ناخوانا باقی بماند</button><button type="button" id="revokeUnit">لغو تأیید</button></div>
+        </form>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
