@@ -249,7 +249,9 @@ $settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UT
 $arguments = "-B -X utf8 -u `"$(Join-Path $release 'serve.py')`" --settings `"$settingsPath`" --release $revision"
 $action = New-ScheduledTaskAction -Execute $runtimePython -Argument $arguments -WorkingDirectory $release
 $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCAL SERVICE' -LogonType ServiceAccount
-$taskSettings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
+# Task Scheduler defaults to priority 7 (BelowNormal), which can starve the
+# service and its OCR workers under CPU load and time out engine discovery.
+$taskSettings = New-ScheduledTaskSettingsSet -Priority 4 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $taskSettings -Trigger (New-ScheduledTaskTrigger -AtStartup) -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 $healthy = $false
