@@ -150,10 +150,12 @@ if (-not $ReuseRuntime) {
     & $runtimePython -B -m pip install --no-cache-dir -r (Join-Path $release 'requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
 }
-$env:OCR_DATA_DIR = Join-Path $tempPath 'release-validation'
+$validationRoot = Join-Path (Split-Path -Parent $storage) "ocr-release-tests\$revision"
 Push-Location -LiteralPath $release
 try {
-    & $runtimePython -B -m unittest discover -s tests -v
+    # The launcher sets storage before import and guards Python spawn children.
+    # Test writes must not use the service's data/temp directories.
+    & $runtimePython -B (Join-Path $release 'scripts\run_isolated_tests.py') --root $validationRoot
     if ($LASTEXITCODE -ne 0) { throw 'Release tests failed.' }
 } finally { Pop-Location }
 

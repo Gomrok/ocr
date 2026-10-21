@@ -235,6 +235,21 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["count"], 100)
 
+    def test_empty_recognition_is_not_advertised_as_successful_downloads(self):
+        response=self.upload()
+        job=response.json["job_id"]
+        path=self.uploads/f"{job}_001.pdf"
+        result={"document":{"pages":1},"performance":{"failed_pages":0},
+                "pages":[{"page":1,"status":"blank","has_text":False,"text":"","tables":[]}]}
+        with patch.object(web,"process_pdf",return_value=result), patch.object(web,"_collect_outputs") as outputs:
+            web._process_job(job,[path],2000)
+        outputs.assert_not_called()
+        state=self.client.get(f"/status/{job}").json
+        self.assertEqual(state["state"],"error")
+        self.assertEqual(state["files"],[])
+        self.assertIsNone(state["zip"])
+        self.assertEqual(state["file_statuses"][0]["state"],"error")
+
     def test_duplicate_owner_job_is_rejected(self):
         self.assertEqual(self.upload().status_code, 200)
         self.assertEqual(self.upload().status_code, 409)

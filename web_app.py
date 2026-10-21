@@ -259,6 +259,14 @@ def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
                                                  display_name=JOBS[job_id]["documents"][pdf_path.name])
                     if result["performance"]["failed_pages"] == result["document"]["pages"]:
                         _finish_document(job_id, idx, "error")
+                        with LOCK:
+                            JOBS[job_id]["log"].append("از این سند متنی استخراج نشد؛ خروجی خالی به‌عنوان نتیجهٔ موفق ارائه نمی‌شود.")
+                        continue
+                    if not any(page.get("has_text", bool(page.get("text", "").strip()) or bool(page.get("tables")))
+                               for page in result.get("pages", [])):
+                        _finish_document(job_id, idx, "error")
+                        with LOCK:
+                            JOBS[job_id]["log"].append("سند فاقد متن استخراج‌شده است؛ فایل و پیش‌نمایش صفحه را بررسی کنید.")
                         continue
                 except Exception:  # noqa: BLE001
                     app.logger.exception("OCR document failed for job %s", job_id)

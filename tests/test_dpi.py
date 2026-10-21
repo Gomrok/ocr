@@ -26,7 +26,12 @@ class ResolutionTests(unittest.TestCase):
                     metrics = Metrics()
                     try:
                         with patch.object(pipeline.L, "analyze_layout", return_value=[]) as layout:
-                            result = pipeline.ocr_page(master, [SimpleNamespace(name="test_engine")], metrics)
+                            reading = {"text":"آزمایش","engine":"test_engine","words":[
+                                {"text":"آزمایش","bbox":[35,35,65,55],"confidence":.99}]}
+                            with patch.object(pipeline.E, "ocr_many", return_value=[reading.copy() for _ in range(4)]) as recognize:
+                                result = pipeline.ocr_page(master, [SimpleNamespace(name="test_engine")], metrics)
+                            recognize.assert_called()
+                            self.assertTrue(result["has_text"])
                         target = min(dpi, 500)
                         self.assertEqual(layout.call_args.args[0].shape, (target, target))
                     finally:

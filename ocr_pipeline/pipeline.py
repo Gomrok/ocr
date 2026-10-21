@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -55,6 +56,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     if img is None:
         raise RuntimeError(f"master image unreadable: {master.path}")
     H, W = img.shape[:2]
+    uniform_white = int(img.min()) == 255
     ws = min(1.0, WORK_DPI / master.effective_dpi)
     reference_scale = 2000.0 / master.effective_dpi
     raw_img = img  # مستر خام — برای گذرهای مخصوص (مثل گلیف عددی در صفحات تمیز)
@@ -93,6 +95,9 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             if r.grid:  # شبکهٔ جدول: مرزها به مختصات مستر
                 r.grid = (tuple(int(v / ws) for v in r.grid[0]),
                           tuple(int(v / ws) for v in r.grid[1]))
+        if not regions and not uniform_white:
+            # A missed layout must not skip recognition of a nonblank page.
+            regions = [L.Region(kind="text", bbox=(0, 0, W, H))]
 
     words_all: list[dict] = []
     text_parts: list[str] = []
@@ -235,6 +240,10 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     # متن نهایی صفحه: سطرهای بازسازی‌شده (حفظ ترتیب بصری RTL)
     final_text = "\n".join(lines) if lines else raw_text
     normalized = E.display_text(final_text)
+    has_text = bool(normalized.strip()) or any(
+        cell.get("raw_text", "").strip() for table in tables_out for cell in table["cells"])
+    if not has_text and not uniform_white:
+        raise RuntimeError("OCR returned no text from a nonblank page")
 
     # متن جدول‌ها هم در متن صفحه (Markdown) — بخش ۲۳
     tables_out.sort(key=lambda t: min(c["bbox"][1] for c in t["cells"])
@@ -247,6 +256,9 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "requested_dpi": master.requested_dpi,
         "effective_dpi": master.effective_dpi,
         "master_render": True,
+        "render_method": getattr(master, "render_method", "single"),
+        "status": "blank" if uniform_white else "extracted",
+        "has_text": has_text,
         "source_pdf_pt": {"w": round(master.pdf_w_pt, 1), "h": round(master.pdf_h_pt, 1)},
         "image_mb": master.approx_mem_mb,
         "render_seconds": master.render_seconds,
@@ -1037,10 +1049,14 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
                              "tables": len(res.get("tables", [])),
                              "source": (res.get("engines") or [engine.name])[0]})
         except Exception as exc:  # noqa: BLE001
-            pages_res.append({"page": i + 1, "error": str(exc),
+            logging.getLogger(__name__).exception("OCR failed on page %d", i + 1)
+            reason = {"PDF render lost visible page content": "render_content_lost",
+                      "Incomplete PDF render tile": "render_tile_incomplete",
+                      "OCR returned no text from a nonblank page": "nonblank_page_no_text"}.get(str(exc), "page_processing_failed")
+            pages_res.append({"page": i + 1, "error": reason,
                               "filename": pdf_path.name, "metrics": m.report()})
             if progress_cb:
-                progress_cb({"type": "page_error", "page": i + 1, "error": str(exc)})
+                progress_cb({"type": "page_error", "page": i + 1, "error": reason})
         finally:
             m.stop()
 
@@ -1085,7 +1101,7 @@ def build_txt(pages: list[dict]) -> str:
         if rec.get("error"):
             parts.append(f"[ERROR] {rec['error']}")
             continue
-        parts.append(rec.get("text") or "[بدون متن]")
+        parts.append(rec.get("text") or ("[صفحهٔ سفید]" if rec.get("status") == "blank" else "[متنی استخراج نشد]"))
         for t in rec.get("tables", []):
             parts.append(f"\nجدول {t['table_id']} ({t['rows']}×{t['columns']}):")
             parts.append(t["markdown"])
