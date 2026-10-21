@@ -83,7 +83,7 @@ $logPath = Join-Path $storage 'logs'
 $release = Join-Path $storage "releases\$revision"
 if ((Test-Path -LiteralPath $storage) -and @(Get-ChildItem -LiteralPath $storage -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Private storage must not contain reparse points.' }
 $oldFiles = if (Test-Path -LiteralPath $previousData) { @(Get-ChildItem -LiteralPath $previousData -File -Recurse -Force) } else { @() }
-$oldBytes = ($oldFiles | Measure-Object Length -Sum).Sum
+$oldBytes = if ($oldFiles) { ($oldFiles | Measure-Object Length -Sum).Sum } else { 0L }
 $spaceNeeded = 1536MB + 512MB + [long]$oldBytes
 if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($storage)).AvailableFreeSpace -lt $spaceNeeded) { throw 'Private storage cannot preserve the safety reserve and existing documents.' }
 if ($ReuseRuntime) {
