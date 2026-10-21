@@ -202,15 +202,33 @@ if ($previousTask) {
     $action.SetAttribute('statusDescription', 'OCR storage maintenance')
     [void]$pause.AppendChild($action)
     [void]$rules.PrependChild($pause)
+    $webServer = $pausedConfig.configuration.'system.webServer'
+    $protocol = $webServer.SelectSingleNode('httpProtocol')
+    if ($null -eq $protocol) { $protocol = $pausedConfig.CreateElement('httpProtocol'); [void]$webServer.AppendChild($protocol) }
+    $headers = $protocol.SelectSingleNode('customHeaders')
+    if ($null -eq $headers) { $headers = $pausedConfig.CreateElement('customHeaders'); [void]$protocol.AppendChild($headers) }
+    if ($headers.SelectSingleNode("add[@name='X-OCR-Admission-Pause']")) { throw 'Another operation owns the admission header.' }
+    $pauseToken = [guid]::NewGuid().ToString('N')
+    $header = $pausedConfig.CreateElement('add')
+    $header.SetAttribute('name', 'X-OCR-Admission-Pause')
+    $header.SetAttribute('value', $pauseToken)
+    [void]$headers.AppendChild($header)
     $pauseOwned = $true
     $pausedConfig.Save($proxyConfig)
     Add-Type -AssemblyName System.Net.Http
     $pauseClient = [Net.Http.HttpClient]::new()
     $pauseClient.Timeout = [TimeSpan]::FromSeconds(10)
     try {
-        $pauseResponse = $pauseClient.PostAsync('https://ocr.gomrok.org/upload', [Net.Http.StringContent]::new('')).GetAwaiter().GetResult()
-        $pauseBody = $pauseResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        if ([int]$pauseResponse.StatusCode -ne 503 -or $pauseBody -notmatch 'OCR storage maintenance') { throw 'Could not verify closed upload admissions.' }
+        $pauseConfirmed = $false
+        for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            $pauseResponse = $pauseClient.PostAsync('https://ocr.gomrok.org/upload', [Net.Http.StringContent]::new('')).GetAwaiter().GetResult()
+            $pauseStatus = [int]$pauseResponse.StatusCode
+            $pauseConfirmed = $pauseStatus -eq 503 -and $pauseResponse.Headers.Contains('X-OCR-Admission-Pause') -and ($pauseResponse.Headers.GetValues('X-OCR-Admission-Pause') -contains $pauseToken)
+            $pauseResponse.Dispose()
+            if ($pauseConfirmed) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $pauseConfirmed) { throw "Could not verify closed upload admissions (HTTP $pauseStatus)." }
     } finally { $pauseClient.Dispose() }
     $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5
     if (-not $oldHealth.PSObject.Properties['active_jobs'] -or $oldHealth.active_jobs -ne 0) { throw 'Active OCR jobs must complete before deployment.' }
@@ -243,7 +261,7 @@ if (-not $healthy) {
     throw 'Release health check failed.'
 }
 
-Copy-Item -LiteralPath (Join-Path $release 'iis\web.config') -Destination (Join-Path $proxyRoot 'web.config') -Force
+if (-not $pauseOwned) { Copy-Item -LiteralPath (Join-Path $release 'iis\web.config') -Destination (Join-Path $proxyRoot 'web.config') -Force }
 New-Item -ItemType Directory -Path (Join-Path $proxyRoot '.well-known\acme-challenge') -Force | Out-Null
 Add-Type -Path "$env:windir\System32\inetsrv\Microsoft.Web.Administration.dll"
 $manager = [Microsoft.Web.Administration.ServerManager]::new()
@@ -299,5 +317,8 @@ $committed = $true
         if ($null -ne $previousSettingsBytes) { [IO.File]::WriteAllBytes($settingsPath, $previousSettingsBytes) }
         if ($previousTask) { Register-ScheduledTask -TaskName $taskName -Action $previousTask.Actions -Principal $previousTask.Principal -Settings $previousTask.Settings -Trigger $previousTask.Triggers -Force | Out-Null; Start-ScheduledTask -TaskName $taskName }
     }
-    if ($pauseOwned -and $null -ne $proxyBefore) { [IO.File]::WriteAllBytes($proxyConfig, $proxyBefore) }
+    if ($pauseOwned -and $null -ne $proxyBefore) {
+        if ($committed) { Copy-Item -LiteralPath (Join-Path $release 'iis\web.config') -Destination $proxyConfig -Force }
+        else { [IO.File]::WriteAllBytes($proxyConfig, $proxyBefore) }
+    }
 }
