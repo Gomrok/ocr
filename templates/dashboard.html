@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#132A46">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="description" content="بارگذاری گروهی سندهای PDF و دریافت متن، جدول و داده‌های استخراج‌شده.">
+  <title>فضای کار استخراج متن | سامانه پردازش اسناد</title>
+  <link rel="preload" href="{{ url_for('static', filename='fonts/Vazirmatn.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ url_for('static', filename='fonts/Vazir-Bold.woff2') }}" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  <script defer nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-document" viewBox="0 0 24 24"><path d="M6 2.75h8l4 4V21.25H6a2 2 0 0 1-2-2V4.75a2 2 0 0 1 2-2Z"/><path d="M14 2.75v4h4M8 12h8M8 16h8"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2.75 7.5a2 2 0 0 1 2-2h5l2 2h7.5a2 2 0 0 1 2 2v9.75a2 2 0 0 1-2 2H4.75a2 2 0 0 1-2-2Z"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-4 4 4-4 4 4M4 16v3.25a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V16"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 17v2.25a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V17"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M9 4v6M15 14v6"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-5.5 9.5-5.5 9.5 5.5 9.5 5.5-3.5 5.5-9.5 5.5S2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.35-1 1-1 2.2M12 17h.01"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  </svg>
+  <a class="skip-link" href="#workspace">رفتن به محتوای اصلی</a>
+  <button class="nav-overlay" id="navOverlay" type="button" hidden aria-label="بستن منوی کناری"></button>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="ناوبری اصلی">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-document"></use></svg></span>
+        <span><strong>سامانهٔ پردازش اسناد</strong><small>استخراج متن فارسی و انگلیسی</small></span>
+      </div>
+      <nav class="side-nav" aria-label="بخش‌های فضای کار">
+        <a class="nav-link is-active" href="#workspace" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-document"></use></svg><span>استخراج متن</span></a>
+        <a class="nav-link" href="#selection"><svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg><span>فایل‌های این نوبت</span><small class="nav-count" id="navCount">۰</small></a>
+        <a class="nav-link" href="#results"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg><span>خروجی‌ها</span><small class="nav-count" id="navResults">۰</small></a>
+        <button class="nav-link nav-button" type="button" id="openHelpSide"><svg class="icon" aria-hidden="true"><use href="#i-help"></use></svg><span>راهنما</span></button>
+      </nav>
+      <div class="sidebar-footer"><span class="server-dot" aria-hidden="true"></span>پردازش روی سرور</div>
+    </aside>
+
+    <div class="main-area">
+      <header class="topbar">
+        <button class="icon-button mobile-menu-button" type="button" id="openMenu" aria-label="بازکردن منوی کناری" aria-controls="sidebar" aria-expanded="false"><svg class="icon"><use href="#i-menu"></use></svg></button>
+        <div class="topbar-title">سامانهٔ پردازش اسناد</div>
+        <button class="help-button" type="button" id="openHelp"><svg class="icon" aria-hidden="true"><use href="#i-help"></use></svg>راهنمای استفاده</button>
+      </header>
+
+      <main class="content" id="workspace" tabindex="-1" data-dpi-levels="{{ dpi_levels|join(',') }}" data-default-dpi="{{ default_dpi }}">
+        <header class="page-heading">
+          <div><p class="eyebrow">فضای کار اسناد</p><h1>فضای کار استخراج متن</h1><p class="page-subtitle">از انتخاب سند تا دریافت متن و جدول، مراحل پردازش را در یک صفحه دنبال کنید.</p></div>
+          <span class="local-badge">پردازش محلی سند</span>
+        </header>
+
+        <ol class="steps" aria-label="مراحل استخراج متن">
+          <li class="step is-current" id="stepUpload" aria-current="step"><span class="step-number">۱</span><span>انتخاب فایل</span></li>
+          <li class="step" id="stepSettings"><span class="step-number">۲</span><span>تنظیمات</span></li>
+          <li class="step" id="stepProcess"><span class="step-number">۳</span><span>پردازش</span></li>
+          <li class="step" id="stepDownload"><span class="step-number">۴</span><span>دریافت خروجی</span></li>
+        </ol>
+
+        <div class="workspace-grid">
+          <section class="panel batch-panel" aria-labelledby="uploadHeading">
+            <div class="panel-heading"><div><p class="panel-kicker">مرحلهٔ نخست</p><h2 id="uploadHeading">اسناد این نوبت</h2></div><span class="count-badge" id="selectionCount">۰ فایل</span></div>
+            <form id="f" novalidate>
+              <input class="sr-only" type="file" id="file" accept=".pdf,application/pdf" multiple tabindex="-1" aria-label="انتخاب فایل‌های PDF">
+              <div class="drop" id="drop" role="button" tabindex="0" aria-controls="file" aria-describedby="uploadLimits" aria-label="انتخاب یا رها کردن فایل‌های PDF" aria-disabled="false">
+                <svg class="icon drop-icon" aria-hidden="true"><use href="#i-upload"></use></svg>
+                <div><strong>بارگذاری گروهی PDF</strong><span>فایل‌ها را اینجا رها کنید یا از دستگاه انتخاب کنید.</span></div>
+                <span class="select-button">انتخاب فایل‌ها</span>
+              </div>
+              <p class="upload-limits" id="uploadLimits">تا ۱۰۰ فایل · ۳۰۰ صفحه · ۵۰۰ مگابایت در هر نوبت</p>
+              <div class="notice" id="formError" role="alert" hidden><span id="errorText"></span></div>
+              <section class="selection" id="selection" aria-labelledby="selectionHeading">
+                <div class="selection-header"><h3 id="selectionHeading">فایل‌های انتخاب‌شده</h3><button class="subtle-button" type="button" id="clearFiles" hidden>پاک‌کردن فهرست</button></div>
+                <p class="selection-empty" id="selectionEmpty">هنوز فایلی انتخاب نشده است.</p>
+                <div class="file-list" id="flist" role="list" aria-label="فهرست فایل‌های این نوبت"></div>
+              </section>
+              <div class="proposal-strip"><span class="proposal-tag">پیشنهادی</span><span><bdi dir="ltr" lang="en">JPG · PNG · TIFF · BMP</bdi>؛ پشتیبانی از تصویر در نسخهٔ بعدی</span></div>
+              <div class="form-footer"><p>استخراج متن پس از بارگذاری روی سرور آغاز می‌شود.</p><button class="primary-button" type="submit" id="go" disabled><span id="goLabel">شروع پردازش</span><svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg></button></div>
+            </form>
+          </section>
+
+          <section class="panel settings-panel" aria-labelledby="qualityHeading">
+            <div class="panel-heading"><div><p class="panel-kicker">مرحلهٔ دوم</p><h2 id="qualityHeading">تنظیمات استخراج</h2></div><svg class="icon panel-icon" aria-hidden="true"><use href="#i-settings"></use></svg></div>
+            <div class="mode-field"><span>حالت پردازش</span><strong>استخراج دقیق</strong></div>
+            <div class="language-field"><div><strong>زبان متن</strong><span class="proposal-tag">پیشنهادی</span></div><div class="language-choices" aria-label="انتخاب دستی زبان در دست توسعه است"><button type="button" disabled>فارسی</button><button type="button" disabled>انگلیسی</button><button type="button" disabled class="is-selected">ترکیبی</button></div><p>انتخاب دستی زبان پس از اتصال به موتور فعال می‌شود.</p></div>
+            <details class="advanced-settings" id="advancedSettings" open>
+              <summary>تنظیمات پیشرفته</summary>
+              <div class="quality-heading"><label for="dpiControl">وضوح رندر</label><output id="dpiValue" for="dpiControl" dir="ltr">۲۰۰۰ DPI</output></div>
+              <div class="quality-control" id="qualityControl">
+                <input id="dpiControl" type="range" min="0" max="{{ dpi_levels|length - 1 }}" step="1" value="{{ dpi_levels.index(default_dpi) }}" dir="ltr" aria-valuetext="۲۰۰۰ DPI، سطح ۶ از ۶" aria-describedby="qualityHint qualityScale">
+                <div class="quality-stops" id="dpiStops" dir="ltr" aria-hidden="true">{% for dpi in dpi_levels %}<span data-dpi="{{ dpi }}">{{ dpi }}</span>{% endfor %}</div>
+              </div>
+              <p class="quality-level" id="dpiLevel">سطح ۶ از ۶</p>
+              <p class="quality-hint" id="qualityHint">وضوح بالاتر به زمان و منابع بیشتری نیاز دارد و دقت را تضمین نمی‌کند.</p>
+              <p class="sr-only" id="qualityScale">شش سطح وضوح: ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ و ۲۰۰۰ DPI. پیش‌فرض ۲۰۰۰ است. تنظیم فقط پیش از شروع پردازش تغییر می‌کند.</p>
+            </details>
+          </section>
+        </div>
+
+        <section class="panel run-panel" id="status" data-state="running" aria-labelledby="runTitle" hidden>
+          <div class="run-heading"><div><p class="panel-kicker">مرحلهٔ سوم</p><h2 id="runTitle"><span id="runTitleText">در حال استخراج متن</span></h2></div><span class="status-tag" id="tag" role="status" aria-live="polite">در انتظار شروع</span></div>
+          <div class="progress-row"><strong id="progressValue">۰٪</strong><div class="progress-content"><div class="bar" id="progressBar" role="progressbar" aria-label="پیشرفت پردازش صفحه‌ها" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="fill"></div></div><p id="info">در حال آماده‌سازی فایل‌ها…</p></div></div>
+          <div class="run-meta"><span id="pageCount">۰ از ۰ صفحه بررسی شد</span><span><svg class="icon" aria-hidden="true"><use href="#i-clock"></use></svg>زمان سپری‌شده <bdi id="elapsedTime" dir="ltr">۰۰:۰۰</bdi></span><span id="documentCount">۰ سند</span><span>وضوح این نوبت <bdi id="runDpi" dir="ltr"></bdi></span></div>
+          <button class="subtle-button" id="retryStatus" type="button" hidden>بررسی دوبارهٔ وضعیت</button>
+          <details class="activity-log"><summary>گزارش فعالیت و خطاها</summary><div class="log" id="log" role="log" aria-live="off" aria-label="رویدادهای پردازش" tabindex="0"></div></details>
+        </section>
+
+        <section class="panel preview-panel" id="preview" aria-labelledby="previewHeading">
+          <div class="panel-heading"><div><p class="panel-kicker">مشاهدهٔ نتیجه</p><h2 id="previewHeading">تصویر سند و متن استخراج‌شده</h2></div><span class="proposal-tag">اصلاح متن: پیشنهادی</span></div>
+          <p class="panel-description">پیش‌نمایش صفحه و متن پس از آغاز پردازش در دسترس است. دریافت خروجی به بازبینی وابسته نیست.</p>
+          <div class="preview-toolbar"><label for="previewDocument">سند</label><select id="previewDocument" disabled><option value="">ابتدا فایل‌ها را پردازش کنید</option></select><span class="toolbar-spacer"></span><button class="icon-button" id="prevPage" type="button" aria-label="صفحهٔ پیشین" disabled><svg class="icon"><use href="#i-chevron"></use></svg></button><span id="pageIndicator" aria-live="polite">صفحهٔ ۰ از ۰</span><button class="icon-button flip-icon" id="nextPage" type="button" aria-label="صفحهٔ بعدی" disabled><svg class="icon"><use href="#i-chevron"></use></svg></button><span class="toolbar-divider"></span><button class="icon-button" id="zoomOut" type="button" aria-label="کوچک‌نمایی" disabled><svg class="icon"><use href="#i-minus"></use></svg></button><output id="zoomValue">۱۰۰٪</output><button class="icon-button" id="zoomIn" type="button" aria-label="بزرگ‌نمایی" disabled><svg class="icon"><use href="#i-plus"></use></svg></button></div>
+          <div class="preview-tabs" role="tablist" aria-label="نمایش سند در موبایل"><button type="button" role="tab" id="imageTab" aria-controls="imagePane" aria-selected="true">تصویر سند</button><button type="button" role="tab" id="textTab" aria-controls="textPane" aria-selected="false">متن استخراج‌شده</button></div>
+          <div class="preview-grid">
+            <section class="preview-pane image-pane" id="imagePane" role="tabpanel" aria-labelledby="imageTab"><h3><svg class="icon" aria-hidden="true"><use href="#i-eye"></use></svg>تصویر سند</h3><div class="document-canvas" id="documentCanvas"><p class="preview-empty" id="imageEmpty">پس از آغاز پردازش، تصویر صفحه در این بخش نمایش داده می‌شود.</p><img id="pageImage" alt="" hidden></div></section>
+            <section class="preview-pane text-pane" id="textPane" role="tabpanel" aria-labelledby="textTab"><div class="text-pane-heading"><h3><svg class="icon" aria-hidden="true"><use href="#i-document"></use></svg>متن استخراج‌شده</h3><button class="subtle-button" id="copyPageText" type="button" disabled>کپی متن صفحه</button></div><div class="text-canvas"><p class="preview-empty" id="textEmpty">متن این صفحه پس از پایان استخراج سند نمایش داده می‌شود.</p><pre id="pageText" dir="rtl" hidden></pre></div><p class="preview-note" id="previewNote">خروجی کامل سند را از بخش دریافت خروجی بردارید.</p></section>
+          </div>
+        </section>
+
+        <section class="panel results-panel" id="results" aria-labelledby="resultsHeading">
+          <div class="panel-heading"><div><p class="panel-kicker">مرحلهٔ چهارم</p><h2 id="resultsHeading">دریافت خروجی</h2></div><span class="count-badge" id="resultCount">۰</span></div>
+          <p class="panel-description">فایل‌های آماده را جداگانه یا در بستهٔ ZIP دریافت کنید؛ خروجی جدول برای سندهای جدول‌دار تولید می‌شود.</p>
+          <div class="result-empty" id="resultEmpty"><strong id="resultEmptyTitle">فایلی برای دریافت موجود نیست</strong><p id="resultEmptyText">پس از آماده‌شدن هر سند، خروجی‌های آن در این بخش نمایش داده می‌شوند.</p></div>
+          <div class="files" id="files" hidden><div id="downloadList" class="download-list" aria-label="فایل‌های خروجی"></div></div>
+          <div class="output-actions"><div class="format-list" id="formatList" aria-label="قالب‌های خروجی" dir="ltr"><span data-format="TXT">TXT</span><span data-format="JSON">JSON</span><span data-format="XLSX">XLSX</span><span data-format="CSV">CSV</span><span data-format="HTML">HTML</span><span data-format="ZIP">ZIP</span></div><div id="zipFile"><button class="primary-button zip-button" type="button" disabled>دریافت همه (ZIP)</button></div></div>
+          <div class="future-outputs"><span class="proposal-tag">پیشنهادی</span><span>DOCX</span><span>PDF قابل جست‌وجو</span></div>
+        </section>
+        <footer class="workspace-foot">سامانهٔ پردازش اسناد · استخراج محلی متن</footer>
+        <noscript><p class="notice">برای انتخاب فایل، پیگیری پردازش و دریافت خروجی، جاوااسکریپت مرورگر را فعال کنید.</p></noscript>
+      </main>
+    </div>
+  </div>
+  <nav class="mobile-nav" aria-label="ناوبری موبایل"><a href="#workspace" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-document"></use></svg>استخراج</a><a href="#selection"><svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>فایل‌ها</a><a href="#results"><svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>خروجی‌ها</a></nav>
+  <dialog id="helpDialog" aria-labelledby="helpTitle"><div class="dialog-heading"><h2 id="helpTitle">راهنمای پردازش اسناد</h2><button class="icon-button" type="button" id="closeHelp" aria-label="بستن راهنما"><svg class="icon"><use href="#i-close"></use></svg></button></div><ol><li>فایل‌های PDF را انتخاب کنید؛ در هر نوبت حداکثر ۱۰۰ فایل و ۳۰۰ صفحه پذیرفته می‌شود.</li><li>در تنظیمات پیشرفته، وضوح رندر را انتخاب کنید. مقدار پیش‌فرض ۲۰۰۰ DPI است.</li><li>پردازش را آغاز کنید و پیشرفت صفحه‌ها و گزارش خطا را ببینید.</li><li>متن و تصویر سند را ببینید و فایل‌های کامل را در قالب‌های آماده دریافت کنید.</li></ol><p>ورودی تصویر، انتخاب دستی زبان، اصلاح متن، DOCX و PDF قابل جست‌وجو در دست توسعه‌اند.</p><button class="primary-button" type="button" id="confirmHelp">متوجه شدم</button></dialog>
+</body>
+</html>

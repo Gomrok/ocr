@@ -53,28 +53,35 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.page.status_code, 200)
         self.assertIn('lang="fa" dir="rtl"', self.page.text)
         self.assertIn("Vazir-Bold.woff2", self.page.text)
-        self.assertNotIn("<svg", self.page.text)
+        self.assertIn("Vazirmatn.woff2", self.page.text)
+        self.assertIn('id="previewDocument"', self.page.text)
+        self.assertIn('id="downloadList"', self.page.text)
+        self.assertIn("اصلاح متن: پیشنهادی", self.page.text)
         self.assertNotIn("AIza", self.page.text)
         self.assertIsNone(re.search(r"[\U0001f300-\U0001faff\u2600-\u27bf]", self.page.text))
         with self.client.get("/static/fonts/Vazir-Bold.woff2") as font:
             self.assertEqual(font.data[:4], b"wOF2")
 
     def test_brand_palette_and_six_step_resolution_control(self):
-        self.assertIn("سامانه پردازش تصویری سامانه هوش مصنوعی گمرک", self.page.text)
-        self.assertIn("--gm-brand-navy: #102A43", self.page.text)
-        self.assertIn("--gm-brand-accent: #0F766E", self.page.text)
-        self.assertIn("--gm-action-primary: #1D4ED8", self.page.text)
+        self.assertIn("فضای کار استخراج متن", self.page.text)
+        with self.client.get("/static/dashboard.css") as stylesheet:
+            self.assertEqual(stylesheet.status_code, 200)
+            self.assertIn("--navy:#132a46", stylesheet.text)
+            self.assertIn("--teal:#078d86", stylesheet.text)
+            self.assertIn("--blue:#3675db", stylesheet.text)
+            self.assertIn("@media(max-width:760px)", stylesheet.text)
         self.assertRegex(self.page.text, r'id="dpiControl" type="range" min="0" max="5" step="1" value="5"')
         self.assertIn('aria-describedby="qualityHint qualityScale"', self.page.text)
         stops = re.findall(r'<span data-dpi="(\d+)">', self.page.text)
         self.assertEqual(stops, ["100", "250", "500", "1000", "1500", "2000"])
-        self.assertLess(self.page.text.index('id="results"'), self.page.text.index('id="qualityHeading"'))
+        self.assertLess(self.page.text.index('id="qualityHeading"'), self.page.text.index('id="results"'))
 
     def test_csp_and_secure_headers(self):
-        nonce = re.search(r'<script nonce="([^"]+)"', self.page.text)[1]
+        nonce = re.search(r'<script defer nonce="([^"]+)"', self.page.text)[1]
         self.assertIn("'nonce-" + nonce + "'", self.page.headers["Content-Security-Policy"])
         self.assertEqual(self.page.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(self.page.headers["Cache-Control"], "no-store")
+        self.assertIn("script-src 'self'", self.page.headers["Content-Security-Policy"])
         self.assertIn("HttpOnly", self.page.headers["Set-Cookie"])
         self.assertIn("SameSite=Lax", self.page.headers["Set-Cookie"])
 
@@ -105,6 +112,73 @@ class WebTests(unittest.TestCase):
             self.assertEqual(download.status_code, 200)
         self.assertEqual(self.client.get("/download/not-a-job/private.txt").status_code, 404)
         self.assertEqual(self.client.get("/download/" + job + "/../private.txt").status_code, 404)
+
+    def test_preview_is_owned_and_bounded_to_document_pages(self):
+        job = self.upload(pdf_bytes(2)).json["job_id"]
+        image = self.client.get(f"/preview/{job}/1/1")
+        self.assertEqual(image.status_code, 200)
+        self.assertEqual(image.mimetype, "image/png")
+        self.assertLessEqual(max(pymupdf.Pixmap(image.data).width, pymupdf.Pixmap(image.data).height), 1400)
+        outsider = web.app.test_client()
+        self.assertEqual(outsider.get(f"/preview/{job}/1/1").status_code, 404)
+        self.assertEqual(outsider.get(f"/preview-text/{job}/1/1").status_code, 404)
+        for index, page in ((2, 1), (1, 3), (0, 1), (1, 0)):
+            with self.subTest(index=index, page=page):
+                self.assertEqual(self.client.get(f"/preview/{job}/{index}/{page}").status_code, 404)
+                self.assertEqual(self.client.get(f"/preview-text/{job}/{index}/{page}").status_code, 404)
+
+    def test_text_preview_uses_only_the_requested_page_and_preserves_digits(self):
+        job = self.upload(pdf_bytes(2)).json["job_id"]
+        pending = self.client.get(f"/preview-text/{job}/1/1")
+        self.assertEqual(pending.json["state"], "pending")
+        document_id = web.JOBS[job]["file_statuses"][0]["id"]
+        target = self.output / document_id
+        target.mkdir()
+        (target / f"{document_id}.txt").write_text(
+            "==================== PAGE ۱ ====================\nنامه ۰۰۴۶\n"
+            "==================== PAGE ۲ ====================\nمبلغ ۴۶\n", encoding="utf-8")
+        web.JOBS[job]["file_statuses"][0]["state"] = "done"
+        first = self.client.get(f"/preview-text/{job}/1/1").json
+        second = self.client.get(f"/preview-text/{job}/1/2").json
+        self.assertEqual(first["text"], "نامه ۰۰۴۶")
+        self.assertEqual(second["text"], "مبلغ ۴۶")
+        self.assertFalse(first["truncated"])
+
+    def test_status_has_stable_total_and_per_file_state(self):
+        job = self.upload(pdf_bytes(2)).json["job_id"]
+        state = self.client.get(f"/status/{job}").json
+        self.assertEqual(state["pages_total"], 2)
+        self.assertEqual(state["pages_done"], 0)
+        self.assertEqual(state["file_statuses"][0]["page_count"], 2)
+        self.assertEqual(state["file_statuses"][0]["state"], "waiting")
+        self.assertIn("elapsed_seconds", state)
+        self.assertNotIn("started_monotonic", state)
+
+    def test_page_callbacks_keep_batch_denominator_and_partial_file_visible(self):
+        job = self.upload(pdf_bytes(2)).json["job_id"]
+        callback = web._make_cb(job, "سند.pdf", 1)
+        callback({"type": "start", "pages": 2, "dpi": 2000})
+        callback({"type": "page_ok", "page": 1, "words": 4, "tables": 0,
+                  "source": "tesseract", "needs_review": True})
+        callback({"type": "page_error", "page": 2})
+        web._finish_document(job, 1, "done", ["sample/sample.txt"])
+        status = self.client.get(f"/status/{job}").json
+        self.assertEqual((status["pages_total"], status["pages_done"]), (2, 2))
+        self.assertEqual(status["failed_pages"], 1)
+        self.assertEqual(status["review_pages"], 1)
+        self.assertEqual(status["file_statuses"][0]["state"], "partial")
+        self.assertEqual(status["file_statuses"][0]["outputs"], ["sample/sample.txt"])
+
+    def test_preview_rendering_is_concurrency_bounded(self):
+        job = self.upload().json["job_id"]
+        web.PREVIEW_SLOTS.acquire()
+        web.PREVIEW_SLOTS.acquire()
+        try:
+            response = self.client.get(f"/preview/{job}/1/1")
+            self.assertEqual(response.status_code, 503)
+        finally:
+            web.PREVIEW_SLOTS.release()
+            web.PREVIEW_SLOTS.release()
 
     def test_spoofed_and_corrupt_pdfs_are_rejected(self):
         self.assertEqual(self.upload(b"not a pdf").status_code, 400)
