@@ -2,8 +2,36 @@ param(
     [string]$DeploymentRoot = 'C:\Websites\ocr.gomrok.org',
     [string]$Python = 'C:\Program Files\Python311\python.exe',
     [string]$Tesseract = 'C:\Tools\GomrokOCR\Tesseract\tesseract.exe',
+    [string]$StorageRoot,
+    [switch]$ReuseRuntime,
     [switch]$ProvisionDomain
 )
+
+function Copy-OcrDataVerified([string]$Source, [string]$Destination) {
+    $sourcePath = (Resolve-Path -LiteralPath $Source).Path.TrimEnd('\')
+    $destinationPath = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
+    if ($sourcePath -eq $destinationPath -or $destinationPath.StartsWith($sourcePath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Migration requires a separate destination.' }
+    $entries = @((Get-Item -LiteralPath $sourcePath -Force)) + @(Get-ChildItem -LiteralPath $sourcePath -Recurse -Force)
+    if (@($entries | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Existing data contains a reparse point; no migration performed.' }
+    for ($ancestor = $destinationPath; $ancestor; $ancestor = [IO.Path]::GetDirectoryName($ancestor)) {
+        if ((Test-Path -LiteralPath $ancestor) -and ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Migration destination contains a reparse point.' }
+    }
+    if ((Test-Path -LiteralPath $destinationPath) -and @(Get-ChildItem -LiteralPath $destinationPath -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Migration destination contains a reparse point.' }
+    $manifest = @()
+    $files = @($entries | Where-Object { -not $_.PSIsContainer })
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($sourcePath.Length + 1)
+        $target = Join-Path $destinationPath $relative
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $target)) { Copy-Item -LiteralPath $file.FullName -Destination $target }
+        if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash -or (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne $hash) { throw 'Document copy failed hash verification; original files are preserved.' }
+        $manifest += @{Path=$relative;SHA256=$hash;Bytes=$file.Length}
+    }
+    if (@(Get-ChildItem -LiteralPath $sourcePath -File -Recurse -Force).Count -ne $files.Count) { throw 'Source documents changed during migration.' }
+    return $manifest
+}
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $sourceRoot = $PSScriptRoot
@@ -18,13 +46,52 @@ if ($LASTEXITCODE -ne 0 -or -not $remoteHead -or $remoteHead.Split()[0] -ne $rev
 if (-not (Test-Path -LiteralPath $Tesseract -PathType Leaf)) { throw 'Install native Tesseract before deployment.' }
 $root = [IO.Path]::GetFullPath($DeploymentRoot).TrimEnd('\')
 if ($root -ne 'C:\Websites\ocr.gomrok.org') { throw 'Deployment target is outside the approved OCR application directory.' }
-$release = Join-Path $root "releases\$revision"
 $shared = Join-Path $root 'shared'
 $proxyRoot = Join-Path $root 'iis'
 $runtime = Join-Path $root 'runtime'
 $settingsPath = Join-Path $shared 'settings.json'
 $taskName = 'GomrokOCR'
-foreach ($directory in @($release, $shared, $proxyRoot, $runtime, (Join-Path $shared 'data'), (Join-Path $shared 'logs'))) {
+$previousTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$previousSettingsBytes = $null
+$settings = @{}
+if (Test-Path -LiteralPath $settingsPath) {
+    $previousSettingsBytes = [IO.File]::ReadAllBytes($settingsPath)
+    $previous = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+    foreach ($property in $previous.PSObject.Properties) { $settings[$property.Name] = $property.Value }
+}
+$previousData = if ($settings.ContainsKey('OCR_DATA_DIR')) { $settings.OCR_DATA_DIR } else { Join-Path $shared 'data' }
+if (-not $StorageRoot) {
+    $StorageRoot = if ($settings.ContainsKey('OCR_STORAGE_ROOT')) { $settings.OCR_STORAGE_ROOT } else { $shared }
+}
+if ($StorageRoot -notmatch '^[A-Za-z]:[\\/]' -or $StorageRoot.StartsWith('\\')) {
+    throw 'StorageRoot must be an explicit local absolute private directory.'
+}
+$storage = [IO.Path]::GetFullPath($StorageRoot).TrimEnd('\')
+foreach ($forbidden in @($sourceRoot, $proxyRoot)) {
+    $forbidden = [IO.Path]::GetFullPath($forbidden).TrimEnd('\')
+    if ($storage -eq $forbidden -or $storage.StartsWith($forbidden + '\', [StringComparison]::OrdinalIgnoreCase) -or $forbidden.StartsWith($storage + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Storage must be outside the checkout and IIS document root.'
+    }
+}
+if ($storage.TrimEnd('\') -eq [IO.Path]::GetPathRoot($storage).TrimEnd('\')) { throw 'A drive root cannot be private storage.' }
+for ($ancestor = $storage; $ancestor; $ancestor = [IO.Path]::GetDirectoryName($ancestor)) {
+    if ((Test-Path -LiteralPath $ancestor) -and ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Storage ancestors must not be reparse points.' }
+}
+$dataPath = Join-Path $storage 'data'
+$tempPath = Join-Path $storage 'temp'
+$logPath = Join-Path $storage 'logs'
+$release = Join-Path $storage "releases\$revision"
+if ((Test-Path -LiteralPath $storage) -and @(Get-ChildItem -LiteralPath $storage -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Private storage must not contain reparse points.' }
+$oldFiles = if (Test-Path -LiteralPath $previousData) { @(Get-ChildItem -LiteralPath $previousData -File -Recurse -Force) } else { @() }
+$oldBytes = ($oldFiles | Measure-Object Length -Sum).Sum
+$spaceNeeded = 1536MB + 512MB + [long]$oldBytes
+if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($storage)).AvailableFreeSpace -lt $spaceNeeded) { throw 'Private storage cannot preserve the safety reserve and existing documents.' }
+if ($ReuseRuntime) {
+    if (-not $previousTask -or -not (Test-Path -LiteralPath (Join-Path $runtime '.venv\Scripts\python.exe'))) { throw 'No existing runtime is available to reuse.' }
+    $previousRequirements = Join-Path $previousTask.Actions[0].WorkingDirectory 'requirements.txt'
+    if ((Get-FileHash -LiteralPath $previousRequirements).Hash -ne (Get-FileHash -LiteralPath (Join-Path $sourceRoot 'requirements.txt')).Hash) { throw 'Dependencies changed; reusing the runtime is not allowed.' }
+}
+foreach ($directory in @($storage, $shared, $proxyRoot, $runtime)) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 
@@ -49,7 +116,14 @@ foreach ($rule in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl
         $identity, $rule[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
 }
 Set-Acl -LiteralPath $shared -AclObject $acl
-foreach ($directory in @((Join-Path $shared 'data'), (Join-Path $shared 'logs'))) {
+# The second volume is private too; it is not an IIS virtual directory.
+Set-Acl -LiteralPath $storage -AclObject $acl
+if ($null -ne $previousSettingsBytes) {
+    $rollbackSettings = Join-Path $storage "settings-before-$revision.json"
+    if (-not (Test-Path -LiteralPath $rollbackSettings)) { [IO.File]::WriteAllBytes($rollbackSettings, $previousSettingsBytes) }
+}
+foreach ($directory in @($release, $dataPath, $tempPath, $logPath)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+foreach ($directory in @($dataPath, $tempPath, $logPath)) {
     $dataAcl = Get-Acl -LiteralPath $directory
     $dataAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
         [Security.Principal.SecurityIdentifier]::new('S-1-5-19'), 'Modify',
@@ -58,7 +132,7 @@ foreach ($directory in @((Join-Path $shared 'data'), (Join-Path $shared 'logs'))
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $release 'serve.py'))) {
-    $archive = Join-Path $runtime "$revision.zip"
+    $archive = Join-Path $tempPath "$revision.zip"
     & git archive --format=zip "--output=$archive" $revision
     if ($LASTEXITCODE -ne 0) { throw 'Could not archive the pushed revision.' }
     Expand-Archive -LiteralPath $archive -DestinationPath $release
@@ -68,19 +142,21 @@ if (-not (Test-Path -LiteralPath $runtimePython)) {
     & $Python -m venv (Join-Path $runtime '.venv')
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the production environment.' }
 }
-& $runtimePython -m pip install --no-cache-dir -r (Join-Path $release 'requirements.txt')
-if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+$env:TEMP = $tempPath
+$env:TMP = $tempPath
+$env:TMPDIR = $tempPath
+$env:PYTHONDONTWRITEBYTECODE = '1'
+if (-not $ReuseRuntime) {
+    & $runtimePython -B -m pip install --no-cache-dir -r (Join-Path $release 'requirements.txt')
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+}
+$env:OCR_DATA_DIR = Join-Path $tempPath 'release-validation'
 Push-Location -LiteralPath $release
 try {
-    & $runtimePython -m unittest discover -s tests -v
+    & $runtimePython -B -m unittest discover -s tests -v
     if ($LASTEXITCODE -ne 0) { throw 'Release tests failed.' }
 } finally { Pop-Location }
 
-$settings = @{}
-if (Test-Path -LiteralPath $settingsPath) {
-    $previous = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-    foreach ($property in $previous.PSObject.Properties) { $settings[$property.Name] = $property.Value }
-}
 if (-not $settings.ContainsKey('OCR_SECRET_KEY')) {
     $bytes = New-Object byte[] 32
     $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -90,23 +166,67 @@ if (-not $settings.ContainsKey('OCR_SECRET_KEY')) {
 }
 $settings.OCR_SECURE_COOKIES = '1'
 $settings.OCR_ALLOWED_HOSTS = 'ocr.gomrok.org,127.0.0.1,localhost'
-$settings.OCR_DATA_DIR = Join-Path $shared 'data'
+$settings.OCR_STORAGE_ROOT = $storage
+$settings.OCR_DATA_DIR = $dataPath
+$settings.OCR_TEMP_DIR = $tempPath
+$settings.OCR_LOG_DIR = $logPath
 $settings.OCR_TESSDATA_DIR = Join-Path $release 'tessdata'
 $settings.OCR_TESSERACT_ONLY = '1'
 $settings.TESSERACT_CMD = $Tesseract
 $settings.OMP_THREAD_LIMIT = '2'
 $localKey = Join-Path $sourceRoot 'api_key.txt'
 if (Test-Path -LiteralPath $localKey) { $settings.GOOGLE_API_KEY = (Get-Content -LiteralPath $localKey -Raw).Trim() }
-$settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
-
-$previousTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$proxyConfig = Join-Path $proxyRoot 'web.config'
+$proxyBefore = if (Test-Path -LiteralPath $proxyConfig) { [IO.File]::ReadAllBytes($proxyConfig) } else { $null }
+$pauseOwned = $false
+$taskChanged = $false
+$committed = $false
+try {
 if ($previousTask) {
-    try { $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5 }
-    catch { $oldHealth = $null }
-    if ($oldHealth -and $oldHealth.active_jobs -gt 0) { throw 'Active OCR jobs must complete before deployment.' }
+    # Close public upload admissions before checking for idle workers. The old
+    # release predates the application-level drain protocol.
+    if ($null -eq $proxyBefore) { throw 'Cannot safely close public upload admissions.' }
+    [xml]$pausedConfig = [Text.Encoding]::UTF8.GetString($proxyBefore).TrimStart([char]0xFEFF)
+    $rules = $pausedConfig.configuration.'system.webServer'.rewrite.rules
+    if ($rules.SelectSingleNode("rule[@name='OCR storage maintenance']")) { throw 'Another maintenance operation owns upload admissions.' }
+    $pause = $pausedConfig.CreateElement('rule')
+    $pause.SetAttribute('name', 'OCR storage maintenance')
+    $pause.SetAttribute('stopProcessing', 'true')
+    $match = $pausedConfig.CreateElement('match')
+    $match.SetAttribute('url', '^upload/?$')
+    [void]$pause.AppendChild($match)
+    $action = $pausedConfig.CreateElement('action')
+    $action.SetAttribute('type', 'CustomResponse')
+    $action.SetAttribute('statusCode', '503')
+    $action.SetAttribute('statusReason', 'Service Unavailable')
+    $action.SetAttribute('statusDescription', 'OCR storage maintenance')
+    [void]$pause.AppendChild($action)
+    [void]$rules.PrependChild($pause)
+    $pauseOwned = $true
+    $pausedConfig.Save($proxyConfig)
+    Add-Type -AssemblyName System.Net.Http
+    $pauseClient = [Net.Http.HttpClient]::new()
+    $pauseClient.Timeout = [TimeSpan]::FromSeconds(10)
+    try {
+        $pauseResponse = $pauseClient.PostAsync('https://ocr.gomrok.org/upload', [Net.Http.StringContent]::new('')).GetAwaiter().GetResult()
+        $pauseBody = $pauseResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if ([int]$pauseResponse.StatusCode -ne 503 -or $pauseBody -notmatch 'OCR storage maintenance') { throw 'Could not verify closed upload admissions.' }
+    } finally { $pauseClient.Dispose() }
+    $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5
+    if (-not $oldHealth.PSObject.Properties['active_jobs'] -or $oldHealth.active_jobs -ne 0) { throw 'Active OCR jobs must complete before deployment.' }
+}
+if ((Test-Path -LiteralPath $previousData) -and [IO.Path]::GetFullPath($previousData).TrimEnd('\') -ne $dataPath) {
+    $manifest = @(Copy-OcrDataVerified -Source $previousData -Destination $dataPath)
+    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $storage "migration-$revision.json") -Encoding UTF8
+}
+if ($previousTask) {
+    $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5
+    if (-not $oldHealth.PSObject.Properties['active_jobs'] -or $oldHealth.active_jobs -ne 0) { throw 'A worker is still active; no service restart performed.' }
     Stop-ScheduledTask -TaskName $taskName
 }
-$arguments = "-X utf8 -u `"$(Join-Path $release 'serve.py')`" --settings `"$settingsPath`" --release $revision"
+$taskChanged = $true
+$settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+$arguments = "-B -X utf8 -u `"$(Join-Path $release 'serve.py')`" --settings `"$settingsPath`" --release $revision"
 $action = New-ScheduledTaskAction -Execute $runtimePython -Argument $arguments -WorkingDirectory $release
 $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCAL SERVICE' -LogonType ServiceAccount
 $taskSettings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
@@ -120,9 +240,7 @@ for ($attempt = 0; $attempt -lt 20; $attempt++) {
     } catch { Start-Sleep -Seconds 1 }
 }
 if (-not $healthy) {
-    Stop-ScheduledTask -TaskName $taskName
-    if ($previousTask) { Register-ScheduledTask -TaskName $taskName -Action $previousTask.Actions -Principal $previousTask.Principal -Settings $previousTask.Settings -Trigger $previousTask.Triggers -Force | Out-Null; Start-ScheduledTask -TaskName $taskName }
-    throw 'Release health check failed; the previous task was restored when available.'
+    throw 'Release health check failed.'
 }
 
 Copy-Item -LiteralPath (Join-Path $release 'iis\web.config') -Destination (Join-Path $proxyRoot 'web.config') -Force
@@ -174,3 +292,12 @@ if ($certificate) {
     } finally { $manager.Dispose() }
 }
 [pscustomobject]@{Release=$revision;PublicUrl='https://ocr.gomrok.org';Health=$healthy;ReleasePath=$release}
+$committed = $true
+} finally {
+    if (-not $committed -and $taskChanged) {
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -ne $previousSettingsBytes) { [IO.File]::WriteAllBytes($settingsPath, $previousSettingsBytes) }
+        if ($previousTask) { Register-ScheduledTask -TaskName $taskName -Action $previousTask.Actions -Principal $previousTask.Principal -Settings $previousTask.Settings -Trigger $previousTask.Triggers -Force | Out-Null; Start-ScheduledTask -TaskName $taskName }
+    }
+    if ($pauseOwned -and $null -ne $proxyBefore) { [IO.File]::WriteAllBytes($proxyConfig, $proxyBefore) }
+}
