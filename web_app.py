@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hmac
 import io
+import json
 import os
 import re
 import secrets
@@ -29,6 +30,7 @@ from flask import Flask, g, jsonify, render_template, request, send_file, sessio
 from ocr_pipeline.pipeline import process_pdf
 from ocr_pipeline.engines import TesseractEngine
 from ocr_pipeline.review import ReviewConflict, ReviewStore
+from ocr_pipeline.quality import page_quality, unknown_quality
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # سقف ۵۰۰ مگابایت
@@ -70,6 +72,7 @@ DPI_LEVELS = (100, 250, 500, 1000, 1500, 2000)
 DEFAULT_DPI = 2000
 PREVIEW_SLOTS = threading.BoundedSemaphore(2)
 REVIEW_SLOTS = threading.BoundedSemaphore(2)
+QUALITY_SLOTS = threading.BoundedSemaphore(2)
 MAX_PREVIEW_EDGE = 1400
 MAX_PREVIEW_TEXT_BYTES = 4 * 1024 * 1024
 MAX_PREVIEW_TEXT_CHARS = 30_000
@@ -166,6 +169,8 @@ def _make_cb(job_id: str, fname: str, document_index: int | None = None):
                     summary["pages_done"] += 1
                 if event.get("needs_review"):
                     job["review_pages"] += 1
+                    if summary:
+                        summary["review_pages"] = summary.get("review_pages", 0) + 1
                 src = event.get("source", "")
                 src_fa = "گوگل" if "google" in src else ("محلی+eng" if "eng" in src else "محلی")
                 tbl = f"، {event['tables']} جدول" if event.get("tables") else ""
@@ -249,10 +254,10 @@ def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
                     result = process_pdf(pdf_path, out_dir, dpi=dpi,
                                          force_tesseract=os.environ.get("OCR_TESSERACT_ONLY") == "1",
                                          progress_cb=cb, mode=PIPELINE_MODE,
-                                         candidate_options=_candidate_options(JOBS[job_id].get("candidate_settings", {})))
+                                         candidate_options=_candidate_options(JOBS[job_id].get("candidate_settings", {})),
+                                         handwriting=JOBS[job_id].get("handwriting_declared", False))
                     candidate_revision = result.get("extraction_revision") or result.get("comparison", {}).get("extraction_revision")
                     if candidate_revision:
-                        import json
                         snapshot = out_dir / "extractions" / candidate_revision
                         payload = result if result.get("extraction_revision") else json.loads((snapshot / "extraction.json").read_text("utf-8"))
                         _review_store().register(JOBS[job_id]["owner_id"], payload, snapshot,
@@ -373,6 +378,10 @@ def upload():
             if not valid_pdf and not valid_image:
                 return jsonify(error="فایل PDF یا تصویر معتبر انتخاب کنید." if PIPELINE_MODE == "candidate" else "فقط فایل PDF معتبر قابل پردازش است."), 400
             file.stream.seek(0)
+        handwriting_values = request.form.getlist("handwriting")
+        if len(handwriting_values) > 1 or (handwriting_values and handwriting_values[0] not in ("0", "1")):
+            return jsonify(error="وضعیت دست‌نویس معتبر نیست."), 400
+        handwriting = bool(handwriting_values and handwriting_values[0] == "1")
         candidate_settings = {}
         if PIPELINE_MODE != "legacy":
             allowed = {"profile": ("persian", "mixed", "english"), "candidate_dpi": ("300", "400"), "handwriting": ("0", "1")}
@@ -421,7 +430,7 @@ def upload():
             file_statuses.append({
                 "index": index, "id": path.stem, "name": safe_name,
                 "size": path.stat().st_size, "page_count": page_count,
-                "pages_done": 0, "failed_pages": 0, "state": "waiting", "outputs": [],
+                "pages_done": 0, "failed_pages": 0, "review_pages": 0, "state": "waiting", "outputs": [],
             })
         with LOCK:
             PENDING_OWNERS.discard(owner)
@@ -431,6 +440,7 @@ def upload():
                 "failed_pages": 0, "review_pages": 0, "files": [], "zip": None, "file_index": 0,
                 "file_count": len(saved), "started": datetime.now().isoformat(timespec="seconds"),
                 "candidate_settings": candidate_settings,
+                "handwriting_declared": handwriting,
                 "started_monotonic": time.monotonic(),
             }
         threading.Thread(target=_run_job, args=(job_id, saved, dpi), daemon=True).start()
@@ -536,6 +546,9 @@ def preview_text(job_id: str, document_index: int, page_number: int):
     if summary["state"] in ("waiting", "running"):
         return jsonify(state="pending", text="")
     document_id = summary["id"]
+    with LOCK:
+        handwriting = JOBS.get(job_id, {}).get("handwriting_declared", False)
+    quality, annotations = _preview_quality(document_id, page_number, handwriting=handwriting)
     source = (OUT_DIR / document_id / f"{document_id}.txt").resolve()
     if OUT_DIR.resolve() not in source.parents or not source.is_file():
         return jsonify(state="unavailable", text="")
@@ -553,11 +566,59 @@ def preview_text(job_id: str, document_index: int, page_number: int):
             continue
         end = markers[index + 1].start() if index + 1 < len(markers) else len(content)
         page_text = content[marker.end():end].strip()
+        # Strip only the exact system prefix recorded for this export. Literal
+        # document phrases, ellipses and other text are never regex-filtered.
+        for annotation in annotations:
+            if annotation.get("kind") == "quality_notice":
+                for ending in ("\r\n", "\n"):
+                    prefix = annotation["text"] + ending
+                    if page_text.startswith(prefix):
+                        page_text = page_text[len(prefix):]
+                        break
         truncated = len(page_text) > MAX_PREVIEW_TEXT_CHARS or (source_limited and end == len(content))
         return jsonify(state="ready", text=page_text[:MAX_PREVIEW_TEXT_CHARS],
-                       truncated=truncated)
+                       truncated=truncated, quality=quality)
     return jsonify(state="unavailable", text="", truncated=source_limited,
                    reason="preview_limit" if source_limited else "page_not_found")
+
+
+def _preview_quality(document_id: str, page_number: int, *, handwriting=False):
+    """Read compact quality metadata; bounded fallback supports older exports."""
+    unknown = (unknown_quality(handwriting=handwriting), [])
+    if not QUALITY_SLOTS.acquire(blocking=False):
+        return unknown
+    try:
+        for suffix, limit in (("quality.json", 1024 * 1024), ("json", MAX_PREVIEW_TEXT_BYTES)):
+            path = (OUT_DIR / document_id / f"{document_id}.{suffix}").resolve()
+            if OUT_DIR.resolve() not in path.parents or not path.is_file():
+                continue
+            try:
+                with path.open("rb") as handle:
+                    data = handle.read(limit + 1)
+                if len(data) > limit:
+                    continue
+                payload = json.loads(data)
+                if not isinstance(payload, dict) or not isinstance(payload.get("pages"), list):
+                    continue
+                for page in payload["pages"]:
+                    if not isinstance(page, dict) or page.get("page") != page_number:
+                        continue
+                    quality = page.get("quality")
+                    if suffix == "json":
+                        quality = page_quality(page, handwriting=handwriting or
+                                               bool(page.get("handwriting_declared")) or
+                                               bool(payload.get("document", {}).get("handwriting_declared")))
+                    if not isinstance(quality, dict) or quality.get("human_verified") is not False:
+                        continue
+                    annotations = [item for item in page.get("export_annotations", [])
+                                   if isinstance(item, dict) and item.get("kind") == "quality_notice"
+                                   and isinstance(item.get("text"), str) and len(item["text"]) <= 200]
+                    return quality, annotations
+            except (OSError, ValueError, TypeError, AttributeError):
+                app.logger.warning("OCR quality metadata unavailable for a preview")
+        return unknown
+    finally:
+        QUALITY_SLOTS.release()
 
 
 @app.get("/download/<job_id>/<path:name>")

@@ -28,8 +28,8 @@ from . import preprocess as P
 from . import render as R
 from . import tables as T
 from .metrics import Metrics
+from .quality import CONF_REVIEW, page_quality, quality_notice
 
-CONF_REVIEW = 0.75   # بخش ۲۷: زیر این اطمینان → needs_review
 WORK_DPI = 500      # تحلیل تا ۵۰۰ DPI؛ مسترهای کم‌وضوح دوباره کوچک نمی‌شوند.
 
 
@@ -968,20 +968,25 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
                 api_key: str | None = None, force_tesseract: bool = False,
                 max_pages: int = 0, debug: bool = True,
                 langs: str = "fas", progress_cb=None, *, mode: str | None = None,
-                candidate_options=None, temp_root: Path | None = None) -> dict:
+                candidate_options=None, temp_root: Path | None = None,
+                handwriting: bool = False) -> dict:
     """Own native workers and PDF handles, including exceptional exits."""
     if api_key:
         raise ValueError("External document APIs are disabled; use local Tesseract")
     mode = mode or os.environ.get("OCR_PIPELINE_MODE", "legacy")
     if mode not in ("legacy", "compare", "candidate"):
         raise ValueError("Unknown OCR pipeline mode")
+    if handwriting and mode in ("candidate", "compare"):
+        from dataclasses import replace
+        from .precision.profiles import Options
+        candidate_options = replace(candidate_options or Options(), handwriting=True)
     if mode == "candidate":
         return _candidate_document(pdf_path, out_dir, candidate_options, temp_root,
                                    max_pages, progress_cb, publish_exports=True)
     reuse = os.environ.get('OCR_PERSISTENT_ENGINE', '1') != '0'
     with E.TesseractEngine(langs, reuse_model=reuse) as local, pymupdf.open(pdf_path) as doc:
         payload = _process_document(doc, local, pdf_path, out_dir, dpi, api_key,
-                                    True, max_pages, debug, progress_cb)
+                                    True, max_pages, debug, progress_cb, handwriting=handwriting)
     if mode == "compare":
         try:
             candidate = _candidate_document(pdf_path, out_dir, candidate_options, temp_root,
@@ -1011,7 +1016,7 @@ def _candidate_document(source, out_dir, options, temp_root, max_pages, callback
 
 
 def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
-                       force_tesseract, max_pages, debug, progress_cb):
+                       force_tesseract, max_pages, debug, progress_cb, *, handwriting=False):
     """پردازش کامل یک PDF — مستر 2000DPI (بخش ۳۰)."""
     t0 = time.perf_counter()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1039,13 +1044,16 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
             res["metrics"].update({key: value - engine_before[key]
                                    for key, value in engine_list[-1].statistics().items()})
             res["filename"] = pdf_path.name
+            res["quality"] = page_quality(res, handwriting=handwriting)
+            res["export_annotations"] = ([] if res.get("status") == "blank" else
+                                         [{"kind": "quality_notice", "text": quality_notice(res["quality"])}])
             for f in res.pop("_table_files", []):
                 all_table_files.append(f)
             pages_res.append(res)
             if progress_cb:
                 progress_cb({"type": "page_ok", "page": i + 1,
                              "words": len(res.get("words", [])),
-                             "needs_review": bool(res.get("low_confidence_words")),
+                             "needs_review": res["quality"]["review_required"],
                              "tables": len(res.get("tables", [])),
                              "source": (res.get("engines") or [engine.name])[0]})
         except Exception as exc:  # noqa: BLE001
@@ -1053,8 +1061,10 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
             reason = {"PDF render lost visible page content": "render_content_lost",
                       "Incomplete PDF render tile": "render_tile_incomplete",
                       "OCR returned no text from a nonblank page": "nonblank_page_no_text"}.get(str(exc), "page_processing_failed")
-            pages_res.append({"page": i + 1, "error": reason,
-                              "filename": pdf_path.name, "metrics": m.report()})
+            failed_page = {"page": i + 1, "error": reason,
+                           "filename": pdf_path.name, "metrics": m.report()}
+            failed_page["quality"] = page_quality(failed_page, handwriting=handwriting)
+            pages_res.append(failed_page)
             if progress_cb:
                 progress_cb({"type": "page_error", "page": i + 1, "error": reason})
         finally:
@@ -1063,9 +1073,17 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
     stem = pdf_path.stem
     txt = build_txt(pages_res)
     (out_dir / f"{stem}.txt").write_text(txt, "utf-8")
+    # Compact metadata lets the preview show warnings without loading a large
+    # extraction or putting system annotations into the copied document text.
+    quality_snapshot = {"pages": [{"page": page["page"], "quality": page["quality"],
+                                    "export_annotations": page.get("export_annotations", [])}
+                                   for page in pages_res]}
+    (out_dir / f"{stem}.quality.json").write_text(
+        json.dumps(quality_snapshot, ensure_ascii=False), "utf-8")
     payload = {
         "document": {"filename": pdf_path.name, "pages": n_pages,
-                     "source_dpi": dpi, "engine": engine.name},
+                     "source_dpi": dpi, "engine": engine.name,
+                     "handwriting_declared": bool(handwriting), "human_verified": False},
         "pages": pages_res,
         "performance": {
             "total_seconds": round(time.perf_counter() - t0, 2),
@@ -1101,6 +1119,9 @@ def build_txt(pages: list[dict]) -> str:
         if rec.get("error"):
             parts.append(f"[ERROR] {rec['error']}")
             continue
+        for annotation in rec.get("export_annotations", []):
+            if annotation.get("kind") == "quality_notice":
+                parts.append(annotation["text"])
         parts.append(rec.get("text") or ("[صفحهٔ سفید]" if rec.get("status") == "blank" else "[متنی استخراج نشد]"))
         for t in rec.get("tables", []):
             parts.append(f"\nجدول {t['table_id']} ({t['rows']}×{t['columns']}):")

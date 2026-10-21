@@ -63,8 +63,9 @@
     size.textContent = fileSize(file.size);
     const state = document.createElement('span');
     state.className = 'file-state';
-    state.dataset.state = file.state || 'selected';
-    state.textContent = `${stateLabel(state.dataset.state)}${file.page_count ? ` · ${number(file.pages_done || 0)}/${number(file.page_count)} صفحه` : ''}`;
+    const review = file.state === 'done' && file.review_pages > 0;
+    state.dataset.state = review ? 'review' : file.state || 'selected';
+    state.textContent = `${review ? 'نیازمند بازبینی' : stateLabel(state.dataset.state)}${file.page_count ? ` · ${number(file.pages_done || 0)}/${number(file.page_count)} صفحه` : ''}`;
     const remove = document.createElement('button');
     remove.className = 'remove-file';
     remove.type = 'button';
@@ -159,10 +160,10 @@
     const data = new FormData();
     for (const file of files) data.append('pdfs', file);
     data.append('dpi', dpiLevels[Number(byId('dpiControl').value)]);
+    data.append('handwriting', byId('candidateHandwriting').checked ? '1' : '0');
     if (byId('candidateProfile')) {
       data.append('profile', byId('candidateProfile').value);
       data.append('candidate_dpi', byId('candidateDpi').value);
-      data.append('handwriting', byId('candidateHandwriting').checked ? '1' : '0');
     }
     try {
       const response = await fetch('/upload', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}, body: data, credentials: 'same-origin'});
@@ -170,6 +171,7 @@
       if (!response.ok || !body.job_id) throw new Error(body.error || 'بارگذاری انجام نشد. دوباره تلاش کنید.');
       activeJob = body.job_id;
       byId('dpiControl').disabled = true;
+      byId('candidateHandwriting').disabled = true;
       byId('runDpi').textContent = `${number(candidateMode ? Number(byId('candidateDpi').value) : body.dpi)} DPI`;
       await fetchStatus();
     } catch (error) {
@@ -277,7 +279,9 @@
     const complete = status.state === 'done' || status.state === 'error';
     const title = status.state === 'done' ? 'پردازش پایان یافت' : status.state === 'error' ? 'پردازش انجام نشد' : 'در حال استخراج متن';
     byId('runTitleText').textContent = title;
-    byId('tag').textContent = status.state === 'done' ? 'آمادهٔ دریافت' : status.state === 'error' ? 'نیازمند بررسی' : 'در حال پردازش';
+    byId('tag').textContent = status.state === 'done'
+      ? status.review_pages > 0 ? 'پیش‌نویس نیازمند بازبینی' : 'خروجی خودکار، تأییدنشده'
+      : status.state === 'error' ? 'نیازمند بررسی' : 'در حال پردازش';
     byId('info').textContent = complete
       ? `${number(status.failed_pages || 0)} صفحه با خطا، ${number(status.review_pages || 0)} صفحه با هشدار بازبینی`
       : `سند ${number(status.file_index || 0)} از ${number(status.file_count || 0)} در حال بررسی است`;
@@ -349,6 +353,8 @@
     byId('imageEmpty').hidden = false;
   }
   function showTextEmpty(message) {
+    byId('qualityNotice').hidden = true;
+    byId('qualityNotice').textContent = '';
     byId('pageText').hidden = true;
     byId('copyPageText').disabled = true;
     byId('textEmpty').textContent = message;
@@ -377,6 +383,16 @@
       if (sequence !== previewSequence) return;
       if (!response.ok) throw new Error();
       if (body.state === 'ready') {
+        const quality = body.quality || {};
+        let notice = 'متن خودکار، تأیید انسانی نشده است.';
+        if (quality.status === 'blank') notice = 'این صفحه سفید گزارش شده است.';
+        else if (quality.handwriting_declared) notice = 'سند دارای دست‌نویس اعلام شده است. این خوانش قابل اتکا نیست و باید با تصویر و توسط انسان بازبینی شود.';
+        else if (quality.review_required && quality.metadata_available) notice = 'پیش‌نویس نیازمند بازبینی؛ متن زیر دارای خوانش مشکوک است و نباید متن تأییدشده تلقی شود.';
+        if (Number.isInteger(quality.flagged_items) && quality.flagged_items > 0) {
+          notice += ` ${number(quality.flagged_items)} مورد علامت بازبینی دارد؛ این شمارش، تعداد خطاهای قطعی یا درصد دقت نیست.`;
+        } else if (!quality.metadata_available) notice += ' جزئیات ابهام این خروجی در دسترس نیست.';
+        byId('qualityNotice').textContent = notice;
+        byId('qualityNotice').hidden = false;
         byId('pageText').textContent = body.text;
         byId('pageText').hidden = false;
         byId('textEmpty').hidden = true;

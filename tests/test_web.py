@@ -1,13 +1,16 @@
 import io
+import json
 import re
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from werkzeug.datastructures import MultiDict
 
 import pymupdf
 import web_app as web
+from ocr_pipeline.quality import page_quality, quality_notice
 
 
 def pdf_bytes(pages=1):
@@ -154,6 +157,82 @@ class WebTests(unittest.TestCase):
         self.assertIn("elapsed_seconds", state)
         self.assertNotIn("started_monotonic", state)
 
+    def test_handwriting_declaration_is_available_and_forwarded_in_legacy_mode(self):
+        self.assertIn('id="candidateHandwriting"', self.page.text)
+        job = self.upload(handwriting="1").json["job_id"]
+        self.assertTrue(web.JOBS[job]["handwriting_declared"])
+        with patch.object(web, "process_pdf", return_value={
+                "document": {"pages": 1}, "performance": {"failed_pages": 0},
+                "pages": [{"text": "synthetic", "has_text": True}]} ) as process, \
+                patch.object(web, "_collect_outputs", return_value=[]):
+            web._process_job(job, [self.uploads/f"{job}_001.pdf"], 2000)
+        self.assertTrue(process.call_args.kwargs["handwriting"])
+        self.assertEqual(process.call_args.kwargs["mode"], "legacy")
+
+    def test_invalid_or_duplicate_handwriting_flags_are_rejected_before_saving(self):
+        for values in (["yes"], ["false"], ["1", "0"]):
+            data = MultiDict([("pdfs", (io.BytesIO(pdf_bytes()), "test.pdf")),
+                              *(("handwriting", value) for value in values)])
+            response = self.client.post("/upload", data=data, headers={"X-CSRF-Token": self.csrf})
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(list(self.uploads.iterdir()), [])
+        web.threading.Thread.assert_not_called()
+
+    def _preview_fixture(self, text):
+        job = self.upload().json["job_id"]
+        identifier = web.JOBS[job]["file_statuses"][0]["id"]
+        target = self.output/identifier
+        target.mkdir()
+        (target/f"{identifier}.txt").write_bytes((
+            "==================== PAGE ۱ ====================\r\n" + text).encode("utf-8"))
+        web.JOBS[job]["file_statuses"][0]["state"] = "done"
+        return job, identifier, target
+
+    def test_preview_exposes_uncertainty_and_strips_only_recorded_export_prefix(self):
+        quality = page_quality({"words": [{"text": "۶", "confidence": .3}]}, handwriting=True)
+        notice = quality_notice(quality)
+        content = notice + "\r\n۰۰۴۶ NA ... <script>alert(1)</script>"
+        job, identifier, target = self._preview_fixture(notice + "\r\n" + content)
+        metadata = {"pages": [{"page": 1, "quality": quality,
+                               "export_annotations": [{"kind": "quality_notice", "text": notice}]}]}
+        (target/f"{identifier}.quality.json").write_text(json.dumps(metadata), "utf-8")
+        response = self.client.get(f"/preview-text/{job}/1/1").json
+        self.assertEqual(response["text"], content)
+        self.assertTrue(response["quality"]["review_required"])
+        self.assertTrue(response["quality"]["handwriting_declared"])
+        self.assertEqual(response["quality"]["flagged_items"], 1)
+        outsider = web.app.test_client()
+        outsider.get("/")
+        self.assertEqual(outsider.get(f"/preview-text/{job}/1/1").status_code, 404)
+
+    def test_preview_reads_flags_from_older_export_without_removing_document_text(self):
+        content = "[پیش‌نویس نیازمند بازبینی]\r\n۰۰۴۶ ..."
+        job, identifier, target = self._preview_fixture(content)
+        old = {"pages": [{"page": 1, "words": [{"text": "۰۰۴۶", "confidence": .99, "needs_review": True}]}]}
+        (target/f"{identifier}.json").write_text(json.dumps(old), "utf-8")
+        response = self.client.get(f"/preview-text/{job}/1/1").json
+        self.assertEqual(response["text"], content)
+        self.assertEqual(response["quality"]["flagged_items"], 1)
+        self.assertFalse(response["quality"]["human_verified"])
+
+    def test_missing_oversized_and_busy_quality_metadata_are_never_a_clean_result(self):
+        job, identifier, target = self._preview_fixture("۰۰۴۶")
+        metadata = target/f"{identifier}.quality.json"
+        for data in (b"invalid json", b" " * (1024 * 1024 + 1)):
+            metadata.write_bytes(data)
+            response = self.client.get(f"/preview-text/{job}/1/1").json
+            self.assertEqual(response["text"], "۰۰۴۶")
+            self.assertTrue(response["quality"]["review_required"])
+            self.assertFalse(response["quality"]["metadata_available"])
+            self.assertIsNone(response["quality"]["flagged_items"])
+        web.QUALITY_SLOTS.acquire()
+        web.QUALITY_SLOTS.acquire()
+        try:
+            self.assertFalse(self.client.get(f"/preview-text/{job}/1/1").json["quality"]["metadata_available"])
+        finally:
+            web.QUALITY_SLOTS.release()
+            web.QUALITY_SLOTS.release()
+
     def test_page_callbacks_keep_batch_denominator_and_partial_file_visible(self):
         job = self.upload(pdf_bytes(2)).json["job_id"]
         callback = web._make_cb(job, "سند.pdf", 1)
@@ -166,6 +245,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual((status["pages_total"], status["pages_done"]), (2, 2))
         self.assertEqual(status["failed_pages"], 1)
         self.assertEqual(status["review_pages"], 1)
+        self.assertEqual(status["file_statuses"][0]["review_pages"], 1)
         self.assertEqual(status["file_statuses"][0]["state"], "partial")
         self.assertEqual(status["file_statuses"][0]["outputs"], ["sample/sample.txt"])
 
