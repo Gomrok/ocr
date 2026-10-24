@@ -1,0 +1,141 @@
+{
+  "case": "bench_mixed",
+  "source_sha256": "c0d91d9f1bb1556e874f42222301c6826bf26064005435a8b730f385cb9a4cc3",
+  "implementation": "persian_ocr_project",
+  "source_unchanged": true,
+  "dpi": 2000,
+  "elapsed_seconds": 31.626,
+  "pages": 1,
+  "failed_pages": 0,
+  "strict": {
+    "cer": 0.26605504587155965,
+    "wer": 0.5
+  },
+  "normalized": {
+    "cer": 0.13761467889908258,
+    "wer": 0.3870967741935484
+  },
+  "reference_characters": 218,
+  "reference_words": 30,
+  "numeric_token_reference_count": 5,
+  "numeric_token_multiset_matches": 5,
+  "numeric_token_extra_count": 3,
+  "identifier_reference_count": 5,
+  "identifier_exact_matches": 5,
+  "words": 30,
+  "word_review_count": 25,
+  "exports": {
+    "xlsx": {
+      "status": "not_applicable",
+      "required_dependency_ready": false
+    }
+  },
+  "model_hashes": {
+    "fas": "99e420969b5ddd2cb135b416316a7ed417c59c4faf9e0d28941348f6448114df",
+    "eng": "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba"
+  },
+  "performance": {
+    "total_seconds": 31.46,
+    "peak_rss_mb": 767.7,
+    "avg_page_seconds": 31.46,
+    "ocr_calls": 38,
+    "ocr_processes": 4,
+    "ocr_cache_hits": 0,
+    "ocr_native_calls": 97,
+    "fallbacks": 21,
+    "low_confidence_regions": 25,
+    "failed_pages": 0
+  },
+  "page_metrics": {
+    "timings_seconds": {
+      "render": 12.23,
+      "master_read": 5.502,
+      "working_image": 0.14,
+      "preprocess": 0.197,
+      "layout": 1.851,
+      "ocr": 11.064,
+      "recognition_repair": 0.0,
+      "numeric_verification": 0.002
+    },
+    "total_seconds": 31.01,
+    "peak_rss_mb": 767.7,
+    "peak_tree_rss_mb_sampled": 759.5,
+    "tree_cpu_lifetime_seconds_sampled": 54.172,
+    "tree_io_lifetime_read_bytes_sampled": 164054207,
+    "tree_io_lifetime_write_bytes_sampled": 3754307,
+    "resource_scope": "application_tree_including_concurrent_jobs",
+    "sampling_interval_seconds": 0.05,
+    "ocr_calls": 38,
+    "fallbacks": 21,
+    "low_confidence_regions": 25,
+    "ocr_processes": 4,
+    "ocr_cache_hits": 0,
+    "ocr_native_calls": 97
+  },
+  "analysis": {
+    "pct_black": 0.0058,
+    "mean": 253.5,
+    "std": 17.1,
+    "low_contrast": true,
+    "dark_background": false,
+    "noisy": false,
+    "skew_angle": 0.0,
+    "needs_deskew": false
+  },
+  "page_quality": null,
+  "raw_text_normalized": {
+    "cer": 0.37155963302752293,
+    "wer": 0.5161290322580645
+  },
+  "synthetic_numeric_changes": [
+    {
+      "before": "۱۸5011234567",
+      "after": "MSCU۱۲۳۴۵۶۷",
+      "needs_review": true,
+      "numeric_verified": false,
+      "recognition_repaired": true
+    }
+  ],
+  "preprocess_ops": [],
+  "regions": 8,
+  "tables": 0,
+  "effective_dpi": 2000,
+  "evaluation_v2": {
+    "schema_version": 2,
+    "normalizer": "NFC_digits_v1",
+    "text": {
+      "status": "MEASURED",
+      "strict": {
+        "cer": 0.26605504587155965,
+        "wer": 0.5
+      },
+      "normalized": {
+        "cer": 0.13761467889908258,
+        "wer": 0.4
+      },
+      "reference_characters": 218,
+      "reference_words": 30
+    },
+    "numeric": {
+      "status": "MEASURED",
+      "reference_count": 5,
+      "observed_count": 8,
+      "matched": 5,
+      "missing": 0,
+      "extra": 3,
+      "duplicated": 0,
+      "precision": 0.625,
+      "recall": 1.0,
+      "exact_match": false,
+      "incorrect_order": false,
+      "ordered_edit_distance": 3
+    },
+    "fields": {
+      "status": "NOT_MEASURED"
+    },
+    "source_digest": "b601bbef98ebf1394db2b0a63972dd4dea768c25cffdb379f034c40304bed4d7",
+    "status": "MEASURED"
+  },
+  "ablation_variant": "alias_consensus",
+  "limitation": "quality_ablation_only_not_latency_comparison"
+}

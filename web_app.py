@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """سامانهٔ پردازش تصویری گمرک با وضوح قابل انتخاب.
 
 آپلود گروهی PDF، پیشرفت زندهٔ صفحه‌به‌صفحه (progress_cb)،
@@ -9,7 +8,9 @@
 from __future__ import annotations
 
 import hmac
+import io
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -23,8 +24,12 @@ from pathlib import Path
 import pymupdf
 from flask import Flask, g, jsonify, render_template_string, request, send_file, session
 
-from ocr_pipeline.pipeline import process_pdf
+from ocr_pipeline import review as reviews
+from ocr_pipeline.tables import xlsx_available
 from ocr_pipeline.engines import TesseractEngine
+from ocr_pipeline.paddle_engine import PaddleEngine
+from ocr_pipeline.pipeline import process_pdf
+from ocr_pipeline.preview import render_preview
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # سقف ۵۰۰ مگابایت
@@ -55,6 +60,7 @@ RATE_LOCK = threading.Lock()
 UPLOAD_TIMES: dict[str, deque] = {}
 PENDING_OWNERS: set[str] = set()
 LOCAL_ENGINE = TesseractEngine("fas")
+PREVIEW_SLOTS = threading.BoundedSemaphore(2)
 MAX_BATCH_PAGES = 300
 DPI_LEVELS = (100, 250, 500, 1000, 1500, 2000)
 DEFAULT_DPI = 2000
@@ -418,6 +424,7 @@ dialog::backdrop { background: rgb(16 42 67 / 32%); backdrop-filter: blur(4px); 
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 </style>
+{% include 'review_panel_style.html' %}
 </head>
 <body>
 
@@ -448,11 +455,11 @@ dialog::backdrop { background: rgb(16 42 67 / 32%); backdrop-filter: blur(4px); 
   <div class="main-area">
     <header class="topbar">
       <div class="breadcrumb"><span>فضای کار</span><strong>تبدیل سند</strong></div>
-      <div class="topbar-actions"><span class="language" lang="en" dir="ltr">FA / EN</span><button class="help-button" type="button" id="openHelp">راهنمای استفاده</button></div>
+      <div class="topbar-actions"><span class="language">پردازش محلی اسناد</span><button class="help-button" type="button" id="openHelp">راهنمای استفاده</button></div>
     </header>
     <main class="content" id="workspace" tabindex="-1">
       <section class="intro" aria-labelledby="pageTitle">
-        <div><p class="eyebrow">پردازش و تبدیل اسناد</p><h1 id="pageTitle">استخراج متن از <em>اسناد PDF</em></h1><p class="intro-copy">فایل‌های PDF را بارگذاری کنید و متن استخراج‌شده، جدول‌ها و داده‌های ساختاریافته را دریافت نمایید.</p></div>
+        <div><p class="eyebrow">فضای کار اسناد گمرک</p><h1 id="pageTitle">از تصویر سند تا <em>متن قابل بررسی</em></h1><p class="intro-copy">استخراج متن و جدول، مقایسه با سند اصلی و دریافت خروجی‌های قابل ویرایش؛ در یک فضای کاری یکپارچه.</p></div>
 
       </section>
       <ol class="steps" aria-label="مراحل تبدیل سند">
@@ -485,11 +492,15 @@ dialog::backdrop { background: rgb(16 42 67 / 32%); backdrop-filter: blur(4px); 
           <div class="panel-heading"><div class="heading-label"><h2 id="resultsHeading">خروجی‌های شما</h2></div><span class="result-count" id="resultCount">۰</span></div>
           <div class="result-empty" id="resultEmpty"><h3 id="resultEmptyTitle">فایلی برای دریافت موجود نیست</h3><p id="resultEmptyText">پس از پایان پردازش، فایل‌های خروجی در این بخش نمایش داده می‌شوند.</p></div>
           <div class="files" id="files" hidden><div id="zipFile"></div><div class="download-list" id="downloadList" aria-label="دانلود خروجی‌ها"></div></div>
+          {% if not xlsx_ready %}<p role="status">خروجی Excel در این محیط آماده نیست؛ سایر خروجی‌ها قابل دریافت هستند.</p>{% endif %}
           <ul class="output-capabilities"><li>متن قابل ویرایش<small lang="en">TXT</small></li><li>جدول‌های استخراج‌شده<small lang="en">XLSX</small></li><li>دادهٔ ساختاریافته<small lang="en">JSON</small></li></ul>
           <div class="formats" aria-label="قالب‌های خروجی" dir="ltr"><span>TXT</span><span>JSON</span><span>CSV</span><span>XLSX</span><span>HTML</span><span>ZIP</span></div>
         </section>
         <section class="panel quality-panel" aria-labelledby="qualityHeading">
-          <div class="quality-heading"><h2 id="qualityHeading"><label for="dpiControl">قدرت استخراج</label></h2><output class="quality-value" id="dpiValue" for="dpiControl" dir="ltr" aria-live="off">۲۰۰۰ DPI</output></div>
+          <p class="quality-mode">استخراج دقیق</p>
+          <p class="quality-description">اولویت با حفظ جزئیات و بررسی اختلاف خوانش‌ها است. تصویر و متن مبنا بدون تغییر باقی می‌مانند.</p>
+          <details class="quality-advanced"><summary>تنظیمات پیشرفته</summary>
+          <div class="quality-heading"><h2 id="qualityHeading"><label for="dpiControl">وضوح رندر</label></h2><output class="quality-value" id="dpiValue" for="dpiControl" dir="ltr" aria-live="off">۲۰۰۰ DPI</output></div>
           <div class="quality-reading"><span class="quality-caption">وضوح پردازش سند</span><span class="quality-level" id="dpiLevel">سطح ۶ از ۶</span></div>
           <div class="quality-control" id="qualityControl">
             <div class="quality-track">
@@ -501,6 +512,7 @@ dialog::backdrop { background: rgb(16 42 67 / 32%); backdrop-filter: blur(4px); 
           <div class="quality-endpoints" dir="ltr" aria-hidden="true"><span dir="rtl">پردازش سبک‌تر</span><span dir="rtl">جزئیات بیشتر</span></div>
           <p class="quality-hint" id="qualityHint">وضوح بالاتر، پردازش سنگین‌تر. دقت استخراج به کیفیت فایل اصلی وابسته است.</p>
           <p class="sr-only" id="qualityScale">شش سطح وضوح: ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ و ۲۰۰۰ DPI. برای انتخاب، نشانگر را بکشید یا از کلیدهای جهت‌نما استفاده کنید. این تنظیم فقط پیش از شروع هر نوبت قابل تغییر است.</p>
+          </details>
         </section>
         </div>
       </div>
@@ -512,17 +524,19 @@ dialog::backdrop { background: rgb(16 42 67 / 32%); backdrop-filter: blur(4px); 
         <button class="select-button" id="retryStatus" type="button" hidden>بررسی دوبارهٔ وضعیت</button>
         <details class="log-details"><summary>جزئیات پردازش</summary><div class="log" id="log" role="log" aria-live="off" aria-label="رویدادهای پردازش" tabindex="0"></div></details>
       </section>
-      <footer class="workspace-foot"><span>سامانه هوش مصنوعی گمرک</span><b lang="en" dir="ltr">GOMROK IMAGE PROCESSING</b></footer>
+      {% include 'review_panel.html' %}
+      <footer class="workspace-foot"><span>سامانه هوش مصنوعی گمرک</span><b>استخراج، بازبینی و دریافت سند</b></footer>
       <noscript><p class="notice">برای انتخاب و پردازش فایل‌ها، جاوااسکریپت مرورگر را فعال کنید.</p></noscript>
     </main>
   </div>
 </div>
 <dialog id="helpDialog" aria-labelledby="helpTitle">
   <div class="dialog-heading"><h2 id="helpTitle">راهنمای پردازش اسناد</h2><button class="text-button" type="button" id="closeHelp" aria-label="بستن راهنما">بستن</button></div>
-  <ol class="guide-steps"><li><strong>فایل‌های PDF را اضافه کنید</strong><p>انتخاب گروهی یا کشیدن و رها کردن؛ مجموع حجم فایل‌ها در هر نوبت کمتر از ۵۰۰ مگابایت باشد.</p></li><li><strong>وضوح را انتخاب و پردازش را شروع کنید</strong><p>در بخش «قدرت استخراج» یکی از شش سطح ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ یا ۲۰۰۰ DPI را انتخاب نمایید. پیش‌فرض ۲۰۰۰ DPI است؛ وضوح بالاتر معمولاً زمان و منابع بیشتری نیاز دارد و دقت تضمین‌شده نیست.</p></li><li><strong>فایل‌های خروجی را دریافت کنید</strong><p>پیشرفت صفحه‌ها را دنبال کنید و فایل‌های خروجی را به‌صورت جداگانه یا در یک بستهٔ ZIP دریافت نمایید. خروجی جدول برای اسناد جدول‌دار تولید می‌شود.</p></li></ol>
+  <ol class="guide-steps"><li><strong>فایل‌های PDF را اضافه کنید</strong><p>انتخاب گروهی یا کشیدن و رها کردن؛ مجموع حجم فایل‌ها در هر نوبت کمتر از ۵۰۰ مگابایت باشد.</p></li><li><strong>پردازش را شروع کنید</strong><p>پیش‌فرض وضوح رندر ۲۰۰۰ DPI است. شش سطح وضوح در تنظیمات پیشرفته در دسترس‌اند. وضوح بالاتر به‌تنهایی دقت را تضمین نمی‌کند.</p></li><li><strong>خروجی را دریافت یا بازبینی کنید</strong><p>دریافت خروجی خودکار آزاد است. برای بررسی ابهام‌ها، متن و تصویر را کنار هم ببینید. ذخیرهٔ اصلاحات یک نسخهٔ جدید می‌سازد و نتیجهٔ اصلی تغییر نمی‌کند.</p></li></ol>
   <p class="guide-note">پردازش با موتورهای OCR تنظیم‌شده در پروژه انجام می‌شود. در صورت دریافت خطای موتور، تنظیمات سرویس را بررسی کنید.</p>
   <button class="primary-button dialog-close" type="button" id="confirmHelp">متوجه شدم</button>
 </dialog>
+<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='review.js') }}"></script>
 <script nonce="{{ csp_nonce }}">
 (() => {
 'use strict';
@@ -772,6 +786,7 @@ async function poll(id) {
     const names = Array.isArray(state.files) ? state.files.filter(name => typeof name === 'string') : [];
     const zip = typeof state.zip === 'string' ? state.zip : null;
     renderOutputs(id, names, zip);
+    document.dispatchEvent(new CustomEvent('ocr-job', {detail: {id, documents: state.review_documents || []}}));
     const messages = Array.isArray(state.log) ? state.log.map(String).join('\n') : '';
     if (log.textContent !== messages) {
       const follow = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
@@ -794,7 +809,8 @@ async function poll(id) {
     if (state.pages_total) {
       setProgress(100 * state.pages_done / state.pages_total);
       info.textContent = 'صفحهٔ ' + number(state.pages_done) + ' از ' + number(state.pages_total)
-        + ' · فایل ' + number(state.file_index) + ' از ' + number(state.file_count);
+        + ' · فایل ' + number(state.file_index) + ' از ' + number(state.file_count)
+        + (state.state === 'running' && state.stage_label ? ' · ' + state.stage_label : '');
     }
     if (error) {
       const message = 'پردازش با خطا روبه‌رو شد. جزئیات پردازش را برای علت خطا باز کنید.';
@@ -839,6 +855,8 @@ form.addEventListener('submit', async event => {
       headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content } });
     if (typeof data.job_id !== 'string' || !data.job_id) throw new Error('شناسهٔ پردازش دریافت نشد. دوباره تلاش کنید.');
     activeJobId = data.job_id;
+    try { sessionStorage.setItem('gomrok-last-job', data.job_id); } catch {}
+    document.dispatchEvent(new CustomEvent('ocr-job', {detail: {id: data.job_id, documents: []}}));
     renderOutputs(data.job_id, [], null);
     byId('resultEmptyTitle').textContent = 'پردازش اسناد در حال انجام است';
     byId('resultEmptyText').textContent = 'فایل‌های خروجی پس از آماده‌شدن در این بخش نمایش داده می‌شوند.';
@@ -879,6 +897,13 @@ window.addEventListener('pageshow', event => {
     poll(activeJobId);
   } else if (busy) failed('ارسال فایل‌ها متوقف شد. لطفاً دوباره تلاش کنید.');
 });
+try {
+  const previous = sessionStorage.getItem('gomrok-last-job');
+  if (previous && /^[a-f0-9]{32}$/.test(previous)) {
+    controller = new AbortController();
+    poll(previous);
+  }
+} catch {}
 })();
 </script>
 </body>
@@ -907,11 +932,24 @@ def _make_cb(job_id: str, fname: str):
                     f"[{fname}] صفحه {event['page']} — {event['words']} کلمه{tbl} ({src_fa})")
                 if event.get("needs_review"):
                     job["log"].append(f"[{fname}] بخشی از متن صفحهٔ {event['page']} نیاز به بازبینی دارد.")
+                if event.get("warnings"):
+                    job["log"].append(
+                        f"[{fname}] بازخوانی مستقل صفحهٔ {event['page']} کامل نشد؛ نتیجهٔ این صفحه تأییدشده نیست.")
+                if event.get('export_warnings'):
+                    job['log'].append('خروجی Excel در دسترس نیست؛ متن، JSON، CSV و HTML محفوظ هستند.')
             elif t == "page_error":
                 job["pages_done"] += 1
                 job["failed_pages"] += 1
                 job["log"].append(
                     f"[{fname}] استخراج متن صفحهٔ {event['page']} با خطا مواجه شد.")
+            elif t == "stage":
+                stages = {"render": "آماده‌سازی تصویر اصلی",
+                          "primary_ocr": "استخراج متن و جدول با موتور نخست",
+                          "independent_review": "بازخوانی مستقل متن، اعداد و جزئیات",
+                          "exports": "ساخت خروجی‌های هماهنگ"}
+                job["stage"] = event["stage"]
+                job["stage_label"] = stages.get(event["stage"], "پردازش سند")
+                job["log"].append(f"[{fname}] صفحهٔ {event['page']}: {job['stage_label']}.")
             elif t == "done":
                 job["log"].append(
                     f"[{fname}] {event['pages_ok']}/{event['pages']} صفحه، "
@@ -919,14 +957,16 @@ def _make_cb(job_id: str, fname: str):
     return cb
 
 
-def _collect_outputs(stem_dir: Path, stem: str) -> list[str]:
+def _collect_outputs(stem_dir: Path, stem: str, result: dict | None = None) -> list[str]:
     """نسبی: TXT + JSON + جدول‌ها + دیباگ این سند."""
     names = [f"{stem}/{stem}.txt", f"{stem}/{stem}.json"]
+    failed = {p["page"] for p in (result or {}).get("pages", []) if p.get("error")}
     for sub in ("tables", "debug"):
         d = stem_dir / sub
         if d.is_dir():
             for f in sorted(d.glob("*")):
-                if f.is_file():
+                page = re.match(r"page_(\d+)_", f.name)
+                if f.is_file() and not (page and int(page[1]) in failed):
                     names.append(f"{stem}/{sub}/{f.name}")
     return names
 
@@ -955,16 +995,31 @@ def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
                                          progress_cb=cb)
                     if result["performance"]["failed_pages"] == result["document"]["pages"]:
                         continue
-                except Exception:  # noqa: BLE001
-                    app.logger.exception("OCR document failed for job %s", job_id)
+                except Exception:
+                    app.logger.error("OCR document failed for job %s", job_id)
                     with LOCK:
                         JOBS[job_id]["failed_pages"] += 1
                         JOBS[job_id]["log"].append("پردازش این سند انجام نشد. لطفاً قالب و محتوای فایل را بررسی نمایید.")
                     continue
-                names = _collect_outputs(out_dir, stem)
+                try:
+                    review = reviews.create_document(out_dir, result)
+                    with LOCK:
+                        JOBS[job_id].setdefault("review_documents", []).append({
+                            "id": stem, "name": JOBS[job_id]["documents"][pdf_path.name],
+                            "revision": review["revision"], "unresolved": review["unresolved"],
+                            "pages": len(review["pages"]),
+                        })
+                except (OSError, ValueError, KeyError):
+                    app.logger.error("Review preparation failed for job %s", job_id)
+                    with LOCK:
+                        JOBS[job_id]["log"].append("خروجی خودکار آماده است؛ آماده‌سازی بازبینی انجام نشد.")
+                names = _collect_outputs(out_dir, stem, result)
                 all_names.extend(names)
                 with LOCK:
                     JOBS[job_id]["files"].extend(names)
+                    # A completed document remains downloadable after a restart
+                    # even if another document in the same batch was interrupted.
+                    reviews.save_job(DATA_DIR, job_id, JOBS[job_id])
 
             with LOCK:
                 names = list(JOBS[job_id]["files"])
@@ -975,11 +1030,13 @@ def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
                     JOBS[job_id]["zip"] = zip_path.name
             with LOCK:
                 JOBS[job_id]["state"] = "done" if names else "error"
-        except Exception:  # noqa: BLE001
-            app.logger.exception("OCR job failed: %s", job_id)
+                reviews.save_job(DATA_DIR, job_id, JOBS[job_id])
+        except Exception:
+            app.logger.error("OCR job failed: %s", job_id)
             with LOCK:
                 JOBS[job_id]["state"] = "error"
                 JOBS[job_id]["log"].append("پردازش اسناد با خطا مواجه شد. لطفاً دوباره تلاش کنید.")
+                reviews.save_job(DATA_DIR, job_id, JOBS[job_id])
 
 
 def _run_job(job_id: str, pdf_paths: list[Path], dpi: int):
@@ -995,17 +1052,28 @@ def index():
     session.setdefault("csrf_token", secrets.token_urlsafe(32))
     session.permanent = True
     return render_template_string(PAGE, csrf_token=session["csrf_token"], csp_nonce=g.csp_nonce,
-                                  dpi_levels=DPI_LEVELS, default_dpi=DEFAULT_DPI)
+                                  dpi_levels=DPI_LEVELS, default_dpi=DEFAULT_DPI,
+                                  xlsx_ready=xlsx_available())
 
 
 @app.get("/healthz")
 def health():
     ready = LOCAL_ENGINE.available()
+    excel_ready=xlsx_available()
+    ready = ready and (os.environ.get('OCR_REQUIRE_XLSX')!='1' or excel_ready)
+    maximum = os.environ.get("OCR_ACCURACY_MODE") == "maximum_local"
+    second_ready = PaddleEngine.configured()
+    ready = ready and (not maximum or second_ready)
     with LOCK:
-        active_jobs = sum(job["state"] == "running" for job in JOBS.values())
+        active_jobs = sum(job["state"] == "running" for job in JOBS.values()) + len(PENDING_OWNERS)
+        draining = (DATA_DIR / "deployment-drain").exists()
     return jsonify(status="ok" if ready else "unavailable", engine="tesseract" if ready else None,
+                   quality_mode="maximum_local" if maximum else "legacy",
+                   second_engine_ready=second_ready,
+                   exports={"xlsx":{"status":"available" if excel_ready else "unavailable","reason":None if excel_ready else "BLOCKED_DEPENDENCY"}},
                    release=os.environ.get("OCR_RELEASE", "development"),
-                   active_jobs=active_jobs), 200 if ready else 503
+                   active_jobs=active_jobs, drain_supported=True,
+                   draining=draining), 200 if ready else 503
 
 
 @app.post("/upload")
@@ -1016,6 +1084,8 @@ def upload():
     if not _upload_rate_allowed():
         return jsonify(error="تعداد درخواست‌ها بیش از حد مجاز است. لطفاً بعداً تلاش کنید."), 429
     with LOCK:
+        if (DATA_DIR / "deployment-drain").exists():
+            return jsonify(error="سامانه در حال به‌روزرسانی است؛ لطفاً کمی بعد تلاش کنید."), 503
         if owner in PENDING_OWNERS or any(job["owner_id"] == owner and job["state"] == "running" for job in JOBS.values()):
             return jsonify(error="درخواست قبلی شما هنوز در حال پردازش است."), 409
         if len(JOBS) >= 1024:
@@ -1029,7 +1099,12 @@ def upload():
     job_id = None
     saved: list[Path] = []
     try:
-        if shutil.disk_usage(DATA_DIR).free < 1536 * 1024 * 1024:
+        if os.environ.get("OCR_REQUIRE_XLSX")=="1" and not xlsx_available():
+            return jsonify(error="خروجی الزامی Excel آماده نیست؛ پردازش آغاز نشد."),503
+        if os.environ.get("OCR_ACCURACY_MODE") == "maximum_local" and not PaddleEngine.configured():
+            return jsonify(error="موتور بازخوانی محلی آماده نیست؛ پردازش آغاز نشد."), 503
+        if shutil.disk_usage(DATA_DIR).free < reviews.DISK_RESERVE + (
+                request.content_length or app.config["MAX_CONTENT_LENGTH"]):
             return jsonify(error="فضای پردازش موقتاً کافی نیست. لطفاً با پشتیبانی تماس بگیرید."), 503
         fs = request.files.getlist("pdfs")
         if not fs or len(fs) > 100:
@@ -1066,8 +1141,10 @@ def upload():
                 "owner_id": owner, "documents": documents, "dpi": dpi,
                 "state": "running", "log": [], "pages_total": 0, "pages_done": 0,
                 "failed_pages": 0, "review_pages": 0, "files": [], "zip": None, "file_index": 0,
-                "file_count": len(saved), "started": datetime.now().isoformat(timespec="seconds"),
+                "file_count": len(saved),
+                "started": datetime.now().isoformat(timespec="seconds"),  # noqa: DTZ005 - legacy status timestamp.
             }
+            reviews.save_job(DATA_DIR, job_id, JOBS[job_id])
         threading.Thread(target=_run_job, args=(job_id, saved, dpi), daemon=True).start()
         started = True
         return jsonify(job_id=job_id, count=len(saved), dpi=dpi)
@@ -1085,7 +1162,7 @@ def upload():
 @app.get("/status/<job_id>")
 def status(job_id: str):
     with LOCK:
-        job = JOBS.get(job_id)
+        job = _owned_job(job_id)
         if not job or job["owner_id"] != session.get("owner_id"):
             return jsonify({"state": "unknown"}), 404
         return jsonify({key: value for key, value in job.items() if key not in ("owner_id", "documents")}
@@ -1095,14 +1172,107 @@ def status(job_id: str):
 @app.get("/download/<job_id>/<path:name>")
 def download(job_id: str, name: str):
     with LOCK:
-        job = JOBS.get(job_id)
-        if (not job or job["owner_id"] != session.get("owner_id") or
-                (name not in job["files"] and name != job["zip"])):
+        job = _owned_job(job_id)
+        allowed = job and (name in job["files"] or name == job["zip"])
+        if job and not allowed:
+            for doc in job.get("review_documents", []):
+                if reviews.DOC_ID.fullmatch(doc["id"]) and name.startswith(doc["id"] + "/reviews/"):
+                    try:
+                        allowed = name in reviews.read_document(OUT_DIR / doc["id"])["files"]
+                    except (OSError, ValueError):
+                        allowed = False
+                    break
+        if not allowed:
             return "یافت نشد", 404
     p = (OUT_DIR / name).resolve()
     if not p.is_file() or OUT_DIR.resolve() not in p.parents:
         return "یافت نشد", 404
     return send_file(p, as_attachment=True)
+
+
+def _owned_job(job_id: str):
+    """Called under LOCK; private manifests preserve ownership across restarts."""
+    job = JOBS.get(job_id)
+    owner = session.get("owner_id")
+    if job:
+        return job if owner and hmac.compare_digest(job["owner_id"], owner) else None
+    return reviews.load_job(DATA_DIR, job_id, owner)
+
+
+def _review_target(job_id: str, document_id: str):
+    with LOCK:
+        job = _owned_job(job_id)
+        if (not job or not reviews.DOC_ID.fullmatch(document_id)
+                or not document_id.startswith(job_id + "_")
+                or not any(d["id"] == document_id for d in job.get("review_documents", []))):
+            return None
+        root = (OUT_DIR / document_id).resolve()
+        if OUT_DIR.resolve() not in root.parents:
+            return None
+        return job, root
+
+
+@app.route("/review/<job_id>/<document_id>", methods=["GET", "POST"])
+def review_document(job_id: str, document_id: str):
+    target = _review_target(job_id, document_id)
+    if target is None:
+        return jsonify(error="سند یافت نشد."), 404
+    job, root = target
+    try:
+        if request.method == "GET":
+            result = reviews.read_document(root)
+        else:
+            if request.content_length is None or request.content_length > 1024 * 1024:
+                return jsonify(error="حجم اصلاحات بیش از حد مجاز است."), 413
+            if shutil.disk_usage(DATA_DIR).free < 1536 * 1024 * 1024:
+                return jsonify(error="فضای کافی برای ذخیرهٔ نسخهٔ جدید موجود نیست."), 503
+            result = reviews.save_document(root, request.get_json(silent=True))
+            with LOCK:
+                # Merge with the freshest job when two documents are saved concurrently.
+                latest = _owned_job(job_id) or job
+                latest["files"] = list(dict.fromkeys(latest["files"] + result["files"]))
+                for document in latest.get("review_documents", []):
+                    if document["id"] == document_id:
+                        document.update(revision=result["revision"], unresolved=result["unresolved"])
+                reviews.save_job(DATA_DIR, job_id, latest)
+                if job_id in JOBS:
+                    JOBS[job_id] = latest
+        return jsonify(result)
+    except reviews.ReviewConflict:
+        return jsonify(error="نسخهٔ سند تغییر کرده است. پیش از ذخیره، آخرین نسخه را دریافت کنید."), 409
+    except reviews.ReviewLimitError:
+        return jsonify(error="ظرفیت نگهداری نسخهٔ جدید کافی نیست؛ اصلاحات ذخیره نشده‌اند و نسخه‌های قبلی محفوظ‌اند."), 503
+    except (ValueError, TypeError):
+        return jsonify(error="اطلاعات بازبینی معتبر نیست."), 400
+    except OSError:
+        app.logger.error("Review storage failed for job %s", job_id)
+        return jsonify(error="دریافت یا ذخیرهٔ بازبینی انجام نشد."), 503
+
+
+@app.get("/preview/<job_id>/<document_id>/<int:page_number>")
+def preview_document(job_id: str, document_id: str, page_number: int):
+    target = _review_target(job_id, document_id)
+    if target is None:
+        return "یافت نشد", 404
+    job, _root = target
+    filename = document_id + ".pdf"
+    if filename not in job["documents"]:
+        return "یافت نشد", 404
+    source = (UPLOAD_DIR / filename).resolve()
+    if UPLOAD_DIR.resolve() not in source.parents or not source.is_file():
+        return "یافت نشد", 404
+    if not PREVIEW_SLOTS.acquire(blocking=False):
+        return jsonify(error="پیش‌نمایش در حال آماده‌سازی است؛ دوباره تلاش کنید."), 503
+    try:
+        content = render_preview(source, page_number)
+        return send_file(io.BytesIO(content), mimetype="image/png", max_age=0)
+    except IndexError:
+        return "یافت نشد", 404
+    except (RuntimeError, ValueError, OSError):
+        app.logger.error("Preview failed for job %s", job_id)
+        return jsonify(error="ساخت پیش‌نمایش انجام نشد."), 503
+    finally:
+        PREVIEW_SLOTS.release()
 
 
 if __name__ == "__main__":

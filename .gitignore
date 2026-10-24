@@ -5,6 +5,7 @@ api_key.txt
 *.pyc
 .DS_Store
 uploads/
+jobs/
 input/
 .env
 .env.*

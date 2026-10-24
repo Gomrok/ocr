@@ -1,0 +1,140 @@
+[
+  {
+    "case": "bench_table",
+    "source_sha256": "7b4813569b6aa75d15f98043fe168fd9e2f638da7d270781c39535a276b409ea",
+    "implementation": "persian_ocr_project",
+    "source_unchanged": true,
+    "dpi": 2000,
+    "elapsed_seconds": 22.64,
+    "pages": 1,
+    "failed_pages": 0,
+    "strict": {
+      "cer": 0.0,
+      "wer": 0.0
+    },
+    "normalized": {
+      "cer": 0.0,
+      "wer": 0.0
+    },
+    "reference_characters": 23,
+    "reference_words": 4,
+    "numeric_token_reference_count": 0,
+    "numeric_token_multiset_matches": 0,
+    "numeric_token_extra_count": 0,
+    "identifier_reference_count": 0,
+    "identifier_exact_matches": 0,
+    "words": 4,
+    "word_review_count": 0,
+    "performance": {
+      "total_seconds": 22.52,
+      "peak_rss_mb": 739.7,
+      "avg_page_seconds": 22.52,
+      "ocr_calls": 100,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 210,
+      "fallbacks": 26,
+      "low_confidence_regions": 8,
+      "failed_pages": 0
+    },
+    "page_metrics": {
+      "timings_seconds": {
+        "render": 6.569,
+        "master_read": 4.07,
+        "working_image": 0.075,
+        "preprocess": 0.148,
+        "layout": 1.337,
+        "table_ocr": 9.716,
+        "ocr": 0.247,
+        "recognition_repair": 0.0,
+        "numeric_verification": 0.002
+      },
+      "total_seconds": 22.17,
+      "peak_rss_mb": 739.7,
+      "ocr_calls": 100,
+      "fallbacks": 26,
+      "low_confidence_regions": 8,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 210
+    },
+    "analysis": {
+      "pct_black": 0.0096,
+      "mean": 252.5,
+      "std": 22.7,
+      "low_contrast": true,
+      "dark_background": false,
+      "noisy": false,
+      "skew_angle": 0.0,
+      "needs_deskew": false
+    },
+    "page_quality": null,
+    "raw_text_normalized": {
+      "cer": 0.0,
+      "wer": 0.0
+    },
+    "synthetic_numeric_changes": [],
+    "preprocess_ops": [],
+    "regions": 2,
+    "tables": 1,
+    "effective_dpi": 2000,
+    "evaluation_v2": {
+      "schema_version": 2,
+      "normalizer": "NFC_digits_v1",
+      "text": {
+        "status": "MEASURED",
+        "strict": {
+          "cer": 0.0,
+          "wer": 0.0
+        },
+        "normalized": {
+          "cer": 0.0,
+          "wer": 0.0
+        },
+        "reference_characters": 23,
+        "reference_words": 4
+      },
+      "numeric": {
+        "status": "NO_REFERENCE_TOKENS",
+        "reference_count": 0,
+        "observed_count": 0,
+        "matched": 0,
+        "missing": 0,
+        "extra": 0,
+        "duplicated": 0,
+        "precision": null,
+        "recall": null,
+        "exact_match": null,
+        "incorrect_order": false,
+        "ordered_edit_distance": 0
+      },
+      "fields": {
+        "status": "NOT_MEASURED"
+      },
+      "source_digest": "f81a8139e96d686a4e01ee7842c2782d84fc4e578ffb7f43596603d2d85c623b",
+      "status": "MEASURED"
+    },
+    "table_diagnostic": {
+      "scope": "full_pipeline",
+      "status": "MEASURED",
+      "cell_accuracy": 0.8,
+      "row_accuracy": 0.4,
+      "column_accuracy": 0.25,
+      "structure_accuracy": 1.0,
+      "cells_total": 20,
+      "cells_matched": 16
+    },
+    "supervision": {
+      "status": "completed",
+      "exit_code": 0,
+      "wall_seconds_including_startup": 24.335,
+      "peak_tree_rss_mib_sampled": 814.5,
+      "tree_cpu_seconds_sampled_lower_bound": 49.453,
+      "average_core_equivalents_lower_bound": 2.032,
+      "peak_children": 5,
+      "rss_sample_interval_seconds": 0.1,
+      "memory_limit_gib": 8,
+      "deadline_seconds": 600
+    }
+  }
+]

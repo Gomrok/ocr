@@ -30,7 +30,7 @@ class PerformanceTests(unittest.TestCase):
         engine = E.TesseractEngine()
         engine.executable = "trusted-tesseract.exe"
         with patch.object(engine, "native_ok", return_value=True), \
-                patch.object(E.subprocess, "run", side_effect=self.execute) as command:
+                patch.object(E, "_run_local_command", side_effect=self.execute) as command:
             first = engine.ocr_image(b"image")
             first["words"][0]["bbox"] = (0, 0, 1, 1)
             first["extra_passes"] = 99
@@ -43,7 +43,7 @@ class PerformanceTests(unittest.TestCase):
     def test_cache_parameters_and_documents_are_isolated(self):
         engines = [E.TesseractEngine(), E.TesseractEngine()]
         with patch.object(E.TesseractEngine, "native_ok", return_value=True), \
-                patch.object(E.subprocess, "run", side_effect=self.execute) as command:
+                patch.object(E, "_run_local_command", side_effect=self.execute) as command:
             for engine in engines:
                 engine.executable = "trusted-tesseract.exe"
                 for kwargs in ({}, {"psm": 7}, {"whitelist": "123"}, {"langs": "eng"}):
@@ -54,7 +54,7 @@ class PerformanceTests(unittest.TestCase):
         engine = E.TesseractEngine()
         engine.executable = "trusted-tesseract.exe"
         with patch.object(engine, "native_ok", return_value=True), \
-                patch.object(E.subprocess, "run", side_effect=self.execute):
+                patch.object(E, "_run_local_command", side_effect=self.execute):
             for index in range(130):
                 engine.ocr_image(str(index).encode())
         self.assertEqual(len(engine._cache), 128)
@@ -65,7 +65,7 @@ class PerformanceTests(unittest.TestCase):
             return Mock(returncode=0)
 
         with patch.object(engine, "native_ok", return_value=True), \
-                patch.object(E.subprocess, "run", side_effect=large_result):
+                patch.object(E, "_run_local_command", side_effect=large_result):
             for index in range(24):
                 engine.ocr_image(f"large-{index}".encode())
         self.assertLessEqual(engine._cache_bytes, 4 * 1024 * 1024)
@@ -230,7 +230,7 @@ class PerformanceTests(unittest.TestCase):
         image[10, 10] = 0
         image[35:39, 40:44] = 0
         actual = PRE.denoise_preserve_dots(image)
-        self.assertEqual(actual[10, 10], 255)
+        self.assertEqual(actual[10, 10], 0)
         np.testing.assert_array_equal(actual[35:39, 40:44], image[35:39, 40:44])
 
     def test_incomplete_table_number_never_replaces_original(self):

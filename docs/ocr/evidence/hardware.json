@@ -1,0 +1,27 @@
+{
+  "operating_system": {
+    "Caption": "Microsoft Windows Server 2025 Standard",
+    "OSArchitecture": "64-bit",
+    "TotalVisibleMemorySize": 49151452,
+    "FreePhysicalMemory": 20942012
+  },
+  "cpu": {
+    "Name": "Intel(R) Xeon(R) CPU E5-2699 v3 @ 2.30GHz",
+    "NumberOfCores": 24,
+    "NumberOfLogicalProcessors": 24
+  },
+  "memory": {
+    "TotalPhysicalMemory": 50331086848,
+    "HypervisorPresent": true
+  },
+  "display_adapters": [
+    {
+      "Name": "Microsoft Remote Display Adapter",
+      "AdapterRAM": null
+    },
+    {
+      "Name": "Microsoft Basic Display Adapter",
+      "AdapterRAM": 0
+    }
+  ]
+}

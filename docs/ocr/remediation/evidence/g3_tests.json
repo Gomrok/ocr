@@ -1,0 +1,13 @@
+{
+  "tests": 167,
+  "elapsed_seconds": 29.476,
+  "failures": [
+    {
+      "test": "test_accuracy.AccuracyTests.test_consensus_tie_uses_confidence_and_does_not_hide_disagreement",
+      "category": "AssertionError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "successful": false
+}

@@ -1,0 +1,13 @@
+{
+  "tests": 189,
+  "elapsed_seconds": 37.844,
+  "failures": [],
+  "errors": [
+    {
+      "test": "test_precision.PrecisionTests.test_no_cloud_path_in_maximum_local_even_with_key",
+      "category": "TypeError"
+    }
+  ],
+  "skipped": [],
+  "successful": false
+}

@@ -1,0 +1,13 @@
+{
+  "tests": 163,
+  "elapsed_seconds": 30.82,
+  "failures": [
+    {
+      "test": "test_precision.PrecisionTests.test_quality_scoring_does_not_hide_digit_or_space_errors",
+      "category": ""
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "successful": false
+}

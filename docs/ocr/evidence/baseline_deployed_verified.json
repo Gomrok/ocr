@@ -1,0 +1,424 @@
+[
+  {
+    "case": "bench_persian",
+    "source_sha256": "4d75efce79b4732c94374f76625507cb837a3110b525a15a6abe14c2b008f0cf",
+    "implementation": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "source_unchanged": true,
+    "dpi": 2000,
+    "elapsed_seconds": 25.419,
+    "pages": 1,
+    "failed_pages": 0,
+    "strict": {
+      "cer": 0.053452115812917596,
+      "wer": 0.0875
+    },
+    "normalized": {
+      "cer": 0.051224944320712694,
+      "wer": 0.07317073170731707
+    },
+    "reference_characters": 449,
+    "reference_words": 80,
+    "numeric_token_reference_count": 5,
+    "numeric_token_multiset_matches": 1,
+    "numeric_token_extra_count": 3,
+    "identifier_reference_count": 3,
+    "identifier_exact_matches": 1,
+    "words": 80,
+    "word_review_count": 6,
+    "performance": {
+      "total_seconds": 25.24,
+      "peak_rss_mb": 818.4,
+      "avg_page_seconds": 25.24,
+      "ocr_calls": 54,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 123,
+      "fallbacks": 12,
+      "low_confidence_regions": 6,
+      "failed_pages": 0
+    },
+    "page_metrics": {
+      "timings_seconds": {
+        "render": 9.494,
+        "master_read": 5.112,
+        "working_image": 0.157,
+        "preprocess": 0.246,
+        "layout": 1.882,
+        "ocr": 7.468,
+        "recognition_repair": 0.0,
+        "numeric_verification": 0.492
+      },
+      "total_seconds": 24.98,
+      "peak_rss_mb": 818.4,
+      "ocr_calls": 54,
+      "fallbacks": 12,
+      "low_confidence_regions": 6,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 123
+    },
+    "analysis": {
+      "pct_black": 0.0066,
+      "mean": 253.3,
+      "std": 17.7,
+      "low_contrast": true,
+      "dark_background": false,
+      "noisy": false,
+      "skew_angle": 0.0,
+      "needs_deskew": false
+    },
+    "page_quality": {
+      "status": "needs_review",
+      "human_verified": false,
+      "handwriting_declared": false,
+      "metadata_available": true,
+      "review_required": true,
+      "reasons": [
+        "uncertain_recognition"
+      ],
+      "flagged_words": 6,
+      "flagged_items": 6,
+      "word_count": 80,
+      "confidence_is_accuracy": false
+    },
+    "raw_text_normalized": {
+      "cer": 0.022271714922048998,
+      "wer": 0.06097560975609756
+    },
+    "preprocess_ops": [],
+    "regions": 7,
+    "tables": 0,
+    "effective_dpi": 2000,
+    "supervision": {
+      "status": "completed",
+      "exit_code": 0,
+      "wall_seconds_including_startup": 29.034,
+      "peak_tree_rss_mib_sampled": 822.9,
+      "tree_cpu_seconds_sampled_lower_bound": 44.047,
+      "average_core_equivalents_lower_bound": 1.517,
+      "peak_children": 5,
+      "rss_sample_interval_seconds": 0.1,
+      "memory_limit_gib": 8,
+      "deadline_seconds": 600
+    }
+  },
+  {
+    "case": "bench_mixed",
+    "source_sha256": "c0d91d9f1bb1556e874f42222301c6826bf26064005435a8b730f385cb9a4cc3",
+    "implementation": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "source_unchanged": true,
+    "dpi": 2000,
+    "elapsed_seconds": 22.795,
+    "pages": 1,
+    "failed_pages": 0,
+    "strict": {
+      "cer": 0.26605504587155965,
+      "wer": 0.5
+    },
+    "normalized": {
+      "cer": 0.13302752293577982,
+      "wer": 0.3870967741935484
+    },
+    "reference_characters": 218,
+    "reference_words": 30,
+    "numeric_token_reference_count": 5,
+    "numeric_token_multiset_matches": 5,
+    "numeric_token_extra_count": 3,
+    "identifier_reference_count": 5,
+    "identifier_exact_matches": 5,
+    "words": 30,
+    "word_review_count": 5,
+    "performance": {
+      "total_seconds": 22.65,
+      "peak_rss_mb": 816.4,
+      "avg_page_seconds": 22.65,
+      "ocr_calls": 38,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 97,
+      "fallbacks": 21,
+      "low_confidence_regions": 5,
+      "failed_pages": 0
+    },
+    "page_metrics": {
+      "timings_seconds": {
+        "render": 6.74,
+        "master_read": 4.733,
+        "working_image": 0.126,
+        "preprocess": 0.187,
+        "layout": 1.946,
+        "ocr": 8.626,
+        "recognition_repair": 0.0,
+        "numeric_verification": 0.007
+      },
+      "total_seconds": 22.48,
+      "peak_rss_mb": 816.4,
+      "ocr_calls": 38,
+      "fallbacks": 21,
+      "low_confidence_regions": 5,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 97
+    },
+    "analysis": {
+      "pct_black": 0.0058,
+      "mean": 253.5,
+      "std": 17.1,
+      "low_contrast": true,
+      "dark_background": false,
+      "noisy": false,
+      "skew_angle": 0.0,
+      "needs_deskew": false
+    },
+    "page_quality": {
+      "status": "needs_review",
+      "human_verified": false,
+      "handwriting_declared": false,
+      "metadata_available": true,
+      "review_required": true,
+      "reasons": [
+        "uncertain_recognition"
+      ],
+      "flagged_words": 5,
+      "flagged_items": 5,
+      "word_count": 30,
+      "confidence_is_accuracy": false
+    },
+    "raw_text_normalized": {
+      "cer": 0.3669724770642202,
+      "wer": 0.5161290322580645
+    },
+    "preprocess_ops": [],
+    "regions": 8,
+    "tables": 0,
+    "effective_dpi": 2000,
+    "supervision": {
+      "status": "completed",
+      "exit_code": 0,
+      "wall_seconds_including_startup": 24.95,
+      "peak_tree_rss_mib_sampled": 775.9,
+      "tree_cpu_seconds_sampled_lower_bound": 42.062,
+      "average_core_equivalents_lower_bound": 1.686,
+      "peak_children": 5,
+      "rss_sample_interval_seconds": 0.1,
+      "memory_limit_gib": 8,
+      "deadline_seconds": 600
+    }
+  },
+  {
+    "case": "bench_lowq",
+    "source_sha256": "8f266b2c409d01e5cca7a16aa44c812f123f0932420c3ff43d8f065b55d220e9",
+    "implementation": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "source_unchanged": true,
+    "dpi": 2000,
+    "elapsed_seconds": 43.98,
+    "pages": 1,
+    "failed_pages": 0,
+    "strict": {
+      "cer": 0.49888641425389757,
+      "wer": 0.6875
+    },
+    "normalized": {
+      "cer": 0.4922048997772829,
+      "wer": 0.6707317073170732
+    },
+    "reference_characters": 449,
+    "reference_words": 80,
+    "numeric_token_reference_count": 5,
+    "numeric_token_multiset_matches": 1,
+    "numeric_token_extra_count": 10,
+    "identifier_reference_count": 3,
+    "identifier_exact_matches": 1,
+    "words": 91,
+    "word_review_count": 14,
+    "performance": {
+      "total_seconds": 43.84,
+      "peak_rss_mb": 806.8,
+      "avg_page_seconds": 43.84,
+      "ocr_calls": 86,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 228,
+      "fallbacks": 23,
+      "low_confidence_regions": 14,
+      "failed_pages": 0
+    },
+    "page_metrics": {
+      "timings_seconds": {
+        "render": 18.678,
+        "master_read": 3.985,
+        "working_image": 0.135,
+        "preprocess": 0.208,
+        "layout": 2.026,
+        "ocr": 16.869,
+        "recognition_repair": 0.0,
+        "numeric_verification": 1.623
+      },
+      "total_seconds": 43.66,
+      "peak_rss_mb": 806.8,
+      "ocr_calls": 86,
+      "fallbacks": 23,
+      "low_confidence_regions": 14,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 228
+    },
+    "analysis": {
+      "pct_black": 0.0005,
+      "mean": 238.1,
+      "std": 21.9,
+      "low_contrast": true,
+      "dark_background": false,
+      "noisy": false,
+      "skew_angle": 0.0,
+      "needs_deskew": false
+    },
+    "page_quality": {
+      "status": "needs_review",
+      "human_verified": false,
+      "handwriting_declared": false,
+      "metadata_available": true,
+      "review_required": true,
+      "reasons": [
+        "uncertain_recognition"
+      ],
+      "flagged_words": 14,
+      "flagged_items": 14,
+      "word_count": 91,
+      "confidence_is_accuracy": false
+    },
+    "raw_text_normalized": {
+      "cer": 1.2138084632516704,
+      "wer": 1.353658536585366
+    },
+    "preprocess_ops": [],
+    "regions": 9,
+    "tables": 0,
+    "effective_dpi": 2000,
+    "supervision": {
+      "status": "completed",
+      "exit_code": 0,
+      "wall_seconds_including_startup": 47.069,
+      "peak_tree_rss_mib_sampled": 846.4,
+      "tree_cpu_seconds_sampled_lower_bound": 76.125,
+      "average_core_equivalents_lower_bound": 1.617,
+      "peak_children": 5,
+      "rss_sample_interval_seconds": 0.1,
+      "memory_limit_gib": 8,
+      "deadline_seconds": 600
+    }
+  },
+  {
+    "case": "bench_table",
+    "source_sha256": "7b4813569b6aa75d15f98043fe168fd9e2f638da7d270781c39535a276b409ea",
+    "implementation": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "source_unchanged": true,
+    "dpi": 2000,
+    "elapsed_seconds": 28.402,
+    "pages": 1,
+    "failed_pages": 0,
+    "strict": {
+      "cer": 0.0,
+      "wer": 0.0
+    },
+    "normalized": {
+      "cer": 0.0,
+      "wer": 0.0
+    },
+    "reference_characters": 23,
+    "reference_words": 4,
+    "numeric_token_reference_count": 0,
+    "numeric_token_multiset_matches": 0,
+    "numeric_token_extra_count": 0,
+    "identifier_reference_count": 0,
+    "identifier_exact_matches": 0,
+    "words": 4,
+    "word_review_count": 0,
+    "performance": {
+      "total_seconds": 28.17,
+      "peak_rss_mb": 777.7,
+      "avg_page_seconds": 28.17,
+      "ocr_calls": 96,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 204,
+      "fallbacks": 28,
+      "low_confidence_regions": 8,
+      "failed_pages": 0
+    },
+    "page_metrics": {
+      "timings_seconds": {
+        "render": 8.376,
+        "master_read": 4.967,
+        "working_image": 0.129,
+        "preprocess": 0.259,
+        "layout": 1.698,
+        "table_ocr": 11.982,
+        "ocr": 0.424,
+        "recognition_repair": 0.0,
+        "numeric_verification": 0.003
+      },
+      "total_seconds": 27.94,
+      "peak_rss_mb": 777.7,
+      "ocr_calls": 96,
+      "fallbacks": 28,
+      "low_confidence_regions": 8,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 204
+    },
+    "analysis": {
+      "pct_black": 0.0096,
+      "mean": 252.5,
+      "std": 22.9,
+      "low_contrast": true,
+      "dark_background": false,
+      "noisy": false,
+      "skew_angle": 0.0,
+      "needs_deskew": false
+    },
+    "page_quality": {
+      "status": "needs_review",
+      "human_verified": false,
+      "handwriting_declared": false,
+      "metadata_available": true,
+      "review_required": true,
+      "reasons": [
+        "uncertain_recognition"
+      ],
+      "flagged_words": 0,
+      "flagged_items": 8,
+      "word_count": 4,
+      "confidence_is_accuracy": false
+    },
+    "raw_text_normalized": {
+      "cer": 0.0,
+      "wer": 0.0
+    },
+    "preprocess_ops": [],
+    "regions": 2,
+    "tables": 1,
+    "effective_dpi": 2000,
+    "table_diagnostic": {
+      "scope": "full_pipeline",
+      "cell_accuracy": 0.8,
+      "row_accuracy": 0.4,
+      "column_accuracy": 0.5,
+      "structure_accuracy": 1.0,
+      "cells_total": 20,
+      "cells_matched": 16
+    },
+    "supervision": {
+      "status": "completed",
+      "exit_code": 0,
+      "wall_seconds_including_startup": 31.074,
+      "peak_tree_rss_mib_sampled": 672.6,
+      "tree_cpu_seconds_sampled_lower_bound": 54.562,
+      "average_core_equivalents_lower_bound": 1.756,
+      "peak_children": 5,
+      "rss_sample_interval_seconds": 0.1,
+      "memory_limit_gib": 8,
+      "deadline_seconds": 600
+    }
+  }
+]

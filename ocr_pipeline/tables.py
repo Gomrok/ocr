@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """مدل جدول + OCR سلول‌به‌سلول + خروجی‌های CSV/HTML/JSON/XLSX (بخش ۹ تا ۱۱ و ۱۲)."""
 from __future__ import annotations
 
@@ -89,7 +88,7 @@ def strip_grid_lines(crop: np.ndarray) -> np.ndarray:
 
 
 def cell_confidence(words: list[dict]) -> float | None:
-    confs = [w.get("confidence") for w in words if w.get("confidence")]
+    confs = [w['confidence'] for w in words if w.get('confidence') is not None]
     return round(sum(confs) / len(confs), 3) if confs else None
 
 
@@ -180,7 +179,21 @@ def to_xlsx(table: dict, path: Path) -> None:
     wb.save(path)
 
 
-def write_table_outputs(table: dict, out_dir: Path, *, page_no: int | None = None) -> list[str]:
+def xlsx_available() -> bool:
+    try:
+        from openpyxl import Workbook
+        return callable(Workbook)
+    except ImportError:
+        return False
+
+
+def write_table_outputs(table: dict, out_dir: Path, *, page_no: int | None = None,
+                        xlsx_required: bool = True) -> list[str]:
+    """Strict by default; OCR explicitly permits a declared degraded export.
+
+    Only a dependency ImportError is degradable. Disk/format failures propagate
+    so that atomic review publication cannot silently publish broken exports.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = f'page_{page_no:03d}_' if page_no is not None else ''
     tid = f"{prefix}table_{table['table_id']:03d}"
@@ -192,12 +205,18 @@ def write_table_outputs(table: dict, out_dir: Path, *, page_no: int | None = Non
         p = out_dir / f"{tid}.{ext}"
         p.write_text(content, "utf-8")
         paths.append(p.name)
+    xp = out_dir / f"{tid}.xlsx"
     try:
-        xp = out_dir / f"{tid}.xlsx"
         to_xlsx(table, xp)
+    except ImportError:
+        if xlsx_required:
+            raise
+        table['export_status']={'xlsx':{'status':'unavailable','reason':'BLOCKED_DEPENDENCY'}}
+    else:
         paths.append(xp.name)
-    except Exception:  # noqa: BLE001
-        pass
+        table['export_status']={'xlsx':{'status':'available','reason':None}}
+    # The JSON describes actual availability, not an attempted filename.
+    (out_dir / f'{tid}.json').write_text(_json.dumps(table,ensure_ascii=False,indent=2),'utf-8')
     return paths
 
 
@@ -205,7 +224,7 @@ def markdown_table(table: dict) -> str:
     rows = rows_of(table)
     if not rows:
         return ""
-    esc = lambda s: s.replace("|", "\\|") or " "  # noqa: E731
+    esc = lambda s: s.replace("|", "\\|") or " "
     out = ["| " + " | ".join(esc(c) for c in rows[0]) + " |",
            "|" + "---|" * len(rows[0])]
     for row in rows[1:]:

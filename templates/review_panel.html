@@ -1,0 +1,36 @@
+<section class="panel document-workspace" id="reviewWorkspace" data-mobile-pane="text" aria-labelledby="reviewTitle" hidden>
+  <header class="review-header">
+    <div><p class="eyebrow">کنترل نتیجهٔ استخراج</p><h2 id="reviewTitle">سند و متن، کنار یکدیگر</h2><p>بازبینی اختیاری است. دریافت خروجی خودکار نیازی به تأیید دستی ندارد.</p></div>
+    <span class="review-badge" id="reviewRevision">نسخهٔ اصلی</span>
+  </header>
+  <div class="review-toolbar">
+    <label class="review-field grow">سند<select id="reviewDocument" aria-label="سند مورد بازبینی"></select></label>
+    <label class="review-field">صفحه<select id="reviewPage" aria-label="صفحهٔ سند"></select></label>
+    <label class="review-field">بزرگ‌نمایی<select id="reviewZoom"><option value="100">۱۰۰٪</option><option value="150">۱۵۰٪</option><option value="200">۲۰۰٪</option></select></label>
+    <button type="button" id="reviewNext">مورد مبهم بعدی</button>
+    <button type="button" id="reviewReload">دریافت آخرین نسخه</button>
+  </div>
+  <p class="review-message" id="reviewMessage" role="status" aria-live="polite" hidden></p>
+  <p class="review-message" id="reviewPageNotice" hidden></p>
+  <div class="review-mobile-tabs" role="group" aria-label="نمای بازبینی">
+    <button type="button" id="reviewShowText" aria-pressed="true">متن استخراج‌شده</button>
+    <button type="button" id="reviewShowSource" aria-pressed="false">تصویر سند</button>
+  </div>
+  <div class="review-grid" id="reviewGrid" aria-busy="false">
+    <div class="source-pane" id="reviewSourcePane" tabindex="0" aria-label="تصویر سند؛ قابل پیمایش">
+      <div class="source-image-wrap" id="reviewImageWrap">
+        <img id="reviewImage" alt="تصویر اصلی صفحهٔ انتخاب‌شده" decoding="async">
+        <div class="source-selection" id="reviewSelection" hidden></div>
+      </div>
+    </div>
+    <div class="review-text-pane">
+      <label class="review-filter"><input type="checkbox" id="reviewOnlyUncertain">فقط موارد نیازمند بررسی <span id="reviewUnresolved"></span></label>
+      <div id="reviewUnits"></div>
+    </div>
+  </div>
+  <footer class="review-footer">
+    <p id="reviewSaveState">اصل سند و متن خام OCR بدون تغییر نگهداری می‌شوند.</p>
+    <button class="primary-button" type="button" id="reviewSave" disabled>ذخیرهٔ نسخهٔ اصلاح‌شده</button>
+    <div class="review-downloads" id="reviewDownloads" aria-label="دریافت نسخهٔ اصلاح‌شده"></div>
+  </footer>
+</section>

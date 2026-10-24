@@ -1,0 +1,64 @@
+<style nonce="{{ csp_nonce }}">
+.content { max-width: 1440px; }
+.intro { padding-bottom: 8px; }
+.intro h1 { letter-spacing: -.7px; }
+.panel { border-radius: 16px; box-shadow: 0 4px 20px rgba(16,42,67,.025); }
+.sidebar { border-left-color: var(--gm-border-subtle); }
+.brand-name { line-height: 1.7; }
+.brand-caption { color: var(--gm-brand-accent); }
+.drop { background: var(--gm-bg-page); border: 1px dashed var(--gm-border-control); border-radius: 12px; min-height: 220px; }
+.quality-mode { color: var(--gm-brand-accent); margin: 0; font-size: 16px; }
+.quality-description { color: var(--gm-text-secondary); font-size: 12px; margin: 8px 0 20px; }
+.quality-advanced { border-top: 1px solid var(--gm-border-subtle); padding-top: 12px; }
+.quality-advanced summary { cursor: pointer; color: var(--gm-text-secondary); min-height: 44px; }
+.quality-advanced .quality-heading { margin-top: 8px; }
+.document-workspace { margin-top: 24px; overflow: hidden; }
+.review-header { display: flex; align-items: start; justify-content: space-between; gap: 24px; padding: 24px; border-bottom: 1px solid var(--gm-border-subtle); }
+.review-header h2 { margin: 0 0 8px; font-size: 18px; }
+.review-header p { margin: 0; font-size: 12px; color: var(--gm-text-secondary); }
+.review-badge { white-space: nowrap; color: var(--gm-brand-accent); background: var(--gm-bg-accent); padding: 6px 12px; border-radius: 6px; font-size: 12px; }
+.review-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 16px; padding: 16px 24px; background: var(--gm-bg-page); border-bottom: 1px solid var(--gm-border-subtle); }
+.review-field { display: grid; gap: 6px; font-size: 12px; }
+.review-field.grow { flex: 1; min-width: 160px; }
+.review-field select { font: inherit; padding: 10px 12px; min-height: 44px; border: 1px solid var(--gm-border-control); border-radius: 8px; background: white; color: var(--gm-text-primary); max-width: 100%; }
+.review-toolbar button, .review-mobile-tabs button { min-height: 44px; padding: 8px 16px; border: 1px solid var(--gm-border-control); border-radius: 8px; background: white; color: var(--gm-text-primary); }
+.review-toolbar button:hover { background: var(--gm-bg-selected); }
+.review-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 500px; }
+.source-pane { padding: 20px; background: var(--gm-bg-subtle); border-left: 1px solid var(--gm-border-subtle); overflow: auto; max-height: 780px; direction: ltr; }
+.source-image-wrap { position: relative; width: 100%; margin: 0 auto; background: white; box-shadow: 0 4px 24px rgba(16,42,67,.08); }
+.source-image-wrap img { display: block; width: 100%; height: auto; }
+.source-selection { position: absolute; border: 2px solid var(--gm-action-primary); background: rgba(29,78,216,.08); pointer-events: none; }
+.review-text-pane { min-width: 0; max-height: 780px; overflow: auto; padding: 20px; }
+.review-filter { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 12px; border-bottom: 1px solid var(--gm-border-subtle); padding-bottom: 12px; margin-bottom: 16px; }
+.review-filter input, .review-confirm input { accent-color: var(--gm-action-primary); width: 18px; height: 18px; }
+.review-unit { border: 1px solid var(--gm-border-subtle); border-radius: 10px; padding: 14px; margin-bottom: 12px; background: white; }
+.review-unit[data-uncertain="true"] { border-right: 3px solid var(--gm-warning); }
+.review-unit:focus-within, .review-unit.selected { border-color: var(--gm-action-primary); box-shadow: 0 0 0 2px var(--gm-bg-selected); }
+.review-unit-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 11px; color: var(--gm-text-muted); }
+.review-locate { border: 0; background: transparent; color: var(--gm-action-primary); min-height: 44px; padding: 4px; }
+.review-unit textarea { display: block; width: 100%; resize: vertical; min-height: 85px; border: 1px solid var(--gm-border-subtle); border-radius: 6px; background: var(--gm-bg-page); color: var(--gm-text-primary); padding: 10px; font: 700 14px/2 Vazir,Tahoma,sans-serif; }
+.review-confirm { display: flex; gap: 8px; align-items: center; min-height: 44px; font-size: 12px; color: var(--gm-text-secondary); }
+.review-alternatives { color: var(--gm-text-secondary); font-size: 12px; padding: 8px 0; }
+.review-alternatives summary { cursor: pointer; min-height: 32px; }
+.review-alternatives p { white-space: pre-wrap; padding: 8px; background: var(--gm-bg-subtle); border-radius: 4px; }
+.review-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 20px 24px; border-top: 1px solid var(--gm-border-subtle); }
+.review-footer p { flex: 1; margin: 0; color: var(--gm-text-secondary); font-size: 12px; }
+.review-downloads { display: flex; flex-wrap: wrap; gap: 12px; width: 100%; }
+.review-downloads a { padding: 8px 12px; border: 1px solid var(--gm-border-subtle); border-radius: 6px; color: var(--gm-action-primary); }
+.review-message { margin: 16px 24px; padding: 12px 16px; background: var(--gm-bg-info); color: var(--gm-info); border-radius: 8px; font-size: 13px; }
+.review-message[data-error="true"] { background: var(--gm-bg-error); color: var(--gm-error); }
+.review-empty { padding: 40px 16px; text-align: center; color: var(--gm-text-secondary); }
+.review-mobile-tabs { display: none; padding: 12px 24px; gap: 8px; }
+@media (max-width: 800px) {
+  .review-header { flex-direction: column; gap: 12px; padding: 20px; }
+  .review-grid { display: block; min-height: 300px; }
+  .review-mobile-tabs { display: flex; }
+  .review-mobile-tabs button[aria-pressed="true"] { color: var(--gm-action-primary); background: var(--gm-bg-selected); border-color: var(--gm-action-primary); }
+  .document-workspace[data-mobile-pane="text"] .source-pane { display: none; }
+  .document-workspace[data-mobile-pane="source"] .review-text-pane { display: none; }
+  .source-pane { border: 0; max-height: 600px; padding: 12px; }
+  .review-toolbar { gap: 12px; padding: 16px; }
+  .review-text-pane { padding: 16px; max-height: 650px; }
+  .review-footer { padding: 16px; }
+}
+</style>

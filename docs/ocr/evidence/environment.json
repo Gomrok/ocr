@@ -1,0 +1,170 @@
+{
+  "scope": "read_only_environment_snapshot_no_customer_data",
+  "python": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+  "os": "Windows-10-10.0.26100-SP0",
+  "versions": {
+    "Flask": "3.1.3",
+    "numpy": "2.4.6",
+    "opencv-python-headless": "5.0.0.93",
+    "psutil": "7.2.2",
+    "PyMuPDF": "1.28.2",
+    "waitress": "NOT_INSTALLED",
+    "openpyxl": "NOT_INSTALLED",
+    "paddleocr": "NOT_INSTALLED",
+    "paddlex": "NOT_INSTALLED",
+    "paddlepaddle": "NOT_INSTALLED",
+    "ruff": "0.16.8",
+    "Pillow": "12.3.0",
+    "arabic-reshaper": "3.0.1",
+    "python-bidi": "0.6.11"
+  },
+  "logical_cpus": 24,
+  "physical_cpus_psutil": 24,
+  "cpu_affinity_count": 24,
+  "ram_total_bytes": 50331086848,
+  "ram_available_bytes": 20500160512,
+  "disk_free_bytes": 7875424256,
+  "working_head": "6fbe11cf260f56a44741b78c46ba43727081cb99",
+  "working_source_digest": "2bd6bd7de2efabcfd93b7e6c92861eac0b54c56cc5416799a34f1d6f25a36e68",
+  "deployed_release": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+  "production_flags": {
+    "OCR_LOCAL_ONLY": "UNSET",
+    "OCR_TESSERACT_ONLY": "1",
+    "OCR_ACCURACY_MODE": "UNSET",
+    "OCR_PIPELINE_MODE": "UNSET",
+    "OMP_THREAD_LIMIT": "2",
+    "OCR_PERSISTENT_ENGINE": "UNSET",
+    "OCR_SECURE_COOKIES": "1"
+  },
+  "working_source_sha256": {
+    "web_app.py": "c09217cde9b6d611219bf1aaef4e40b63b8b2115dc477e56ed53280272540a13",
+    "serve.py": "f735fc23eb84edbacb04a65a2cf9ff727e5c33f0fd62e0de569f39012206add0",
+    "requirements.txt": "f5ffc8f4647dee32ad85fa6d680e52725996a032254d77c804e3d62bedab526c",
+    "ocr_pipeline/benchmark.py": "9b7eac00e106f9cd9083ddfbbab62295eb9aeb3bd06eb31d54d83711bbc702a9",
+    "ocr_pipeline/engines.py": "1673db13750236e83f837a6dbb4a7def766c4e11b517de0588094a7bbdac7ecc",
+    "ocr_pipeline/layout.py": "d902ef720895252fe048a13636e9f8f4d7660cff6e853d447c214a4115b42f70",
+    "ocr_pipeline/metrics.py": "6b82f8f7e9bceff691cbfee4b2228bf0c1004ec033176a515bc4d8dc14c19203",
+    "ocr_pipeline/model_artifacts.py": "5f058e28421e811821f722064919a46612cfa8b47af8e882183e4a2ad0daf2f0",
+    "ocr_pipeline/native_pool.py": "9841da3bcbe12ecbb123dd881753c8a063b1c57956828ee6d96fca03b8a8112b",
+    "ocr_pipeline/paddle_engine.py": "20bdafb58e8ba514e1af93431372af8cf1dcdb953cfe6749ff3ee42d4e7a79d0",
+    "ocr_pipeline/paddle_worker.py": "e7e279b0306c85b7eb486e7794509d08636878af8bee71b85af26a03c7e5ca93",
+    "ocr_pipeline/pipeline.py": "4e42353329f5949c30922bcdf256c820fec45e7b7d2965ec118509fd64047ed4",
+    "ocr_pipeline/precision.py": "45bd94faa0913f2a9e0cbd2de1352812c5dfec04e0904951c6a5cc1ca5e3fdf3",
+    "ocr_pipeline/preprocess.py": "3402a70086c1ec2e59e9f686c4f2cd578ec8cd682e5da87d63fafba32876e88c",
+    "ocr_pipeline/preview.py": "4a8043b766ba560af6b19112d646f0fbd3d64762265edddc961072a58e68f54b",
+    "ocr_pipeline/preview_worker.py": "b5a941a5d450a18b40841c359929becc47dacebc9303bb17bdeac827282ad705",
+    "ocr_pipeline/process_guard.py": "7028096a779cc47143d6cdb8788b965c9cf107b8b0b86e390c6b9039682bc19e",
+    "ocr_pipeline/provenance.py": "bc71c2b579d13130da10bfa17064dc7e3a6f190a89c2fdc36f7d16b0aa4e435c",
+    "ocr_pipeline/render.py": "8b377a40c5a621b96b9c7fafe0cc5bd7f08a1c375bbe19aa371e928f60460959",
+    "ocr_pipeline/review.py": "c05ec721c0ad9b1568c6bd358bdce0bae14d10ded68226fbf8ea009023304191",
+    "ocr_pipeline/tables.py": "d723ec6ba5ff4a5fc06062c83803939bfc3e34233b8fb37a95ed8e9e68570802",
+    "ocr_pipeline/__init__.py": "998a43cbb6ba257d76a89e396a3cdb62832d8eb9f0911421a45ad4e3e0dd757a"
+  },
+  "deployed_source_sha256": {
+    "ocr_pipeline/benchmark.py": "f5c721601830697203cf83eeebabb099491c84364cb13590a9fc59d8de801f4a",
+    "ocr_pipeline/engines.py": "2a743e6623e5bef50282f0d74c87f3344529fdc9fdf73cae1fc3fb23acdde844",
+    "ocr_pipeline/evaluation.py": "0e8c6e3843c78ae28b13fc82da8d6e40666d8a0643b354c388b78795603fcebf",
+    "ocr_pipeline/layout.py": "d902ef720895252fe048a13636e9f8f4d7660cff6e853d447c214a4115b42f70",
+    "ocr_pipeline/metrics.py": "6b82f8f7e9bceff691cbfee4b2228bf0c1004ec033176a515bc4d8dc14c19203",
+    "ocr_pipeline/native_pool.py": "9841da3bcbe12ecbb123dd881753c8a063b1c57956828ee6d96fca03b8a8112b",
+    "ocr_pipeline/pipeline.py": "afc68413cd800889d2dc7e02d7ac8280d372f8057d6897386db068691259173a",
+    "ocr_pipeline/preprocess.py": "3402a70086c1ec2e59e9f686c4f2cd578ec8cd682e5da87d63fafba32876e88c",
+    "ocr_pipeline/quality.py": "023a8d524e5422fb3dd72bf7f7469931fe6eecf264fa39637d1b3323396ee1d6",
+    "ocr_pipeline/render.py": "a03bdf07ef0cc3883730180bb57b86842c7954a088d54f067b31ac2a698aace4",
+    "ocr_pipeline/review.py": "48b2ba6ecbd1d9d9f6f85ab98776165cfd335f5392e166db33a8d1170ed44d2d",
+    "ocr_pipeline/tables.py": "a06ab13a6ad94fe9ebb981440ab31a5b14a71953f1571ffdabb082ebac8ca5ee",
+    "ocr_pipeline/__init__.py": "998a43cbb6ba257d76a89e396a3cdb62832d8eb9f0911421a45ad4e3e0dd757a",
+    "ocr_pipeline/precision/engine.py": "48d6c8107dbab8550f499b2784b4ce747d2898d267e5d9e43420534e243f886f",
+    "ocr_pipeline/precision/extraction.py": "5bba2eabf48c7d038971c9be2961f5eb0c009ca33c89efbf4bc2ec40557e4f17",
+    "ocr_pipeline/precision/imaging.py": "75b3d7948b381b719a1814e06aef041855a5c09cd6d48f9264c1c019da3aacaf",
+    "ocr_pipeline/precision/profiles.py": "42e71f9445dce7ccefaf287db769552eabbce0bdd598d844831ab974ecda8269",
+    "ocr_pipeline/precision/__init__.py": "779f6c75f6c1a6ccd8a72ac4cd3728667acc2386cf534bf573ab55c5d56809b0",
+    "web_app.py": "e580fc719689bf14cd6d7b6a9a737e29d5f446c751badbc58ad9eb34c7f3e745",
+    "serve.py": "a8ff357289f196897701a2e17db5c63cc5f91cf314edf6195e190c40a767a3bd",
+    "requirements.txt": "40db145d851ca0b154038b42e445b17d793742f7c4806b2f62f551fa3607291f"
+  },
+  "models": [
+    {
+      "name": "Arabic.traineddata",
+      "bytes": 17095279,
+      "sha256": "a80454f72df35c6f52550551dd69b8521ea6a62d834396d1c7dce4c35493902e"
+    },
+    {
+      "name": "eng.traineddata",
+      "bytes": 15400601,
+      "sha256": "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba"
+    },
+    {
+      "name": "fas.traineddata",
+      "bytes": 3325955,
+      "sha256": "99e420969b5ddd2cb135b416316a7ed417c59c4faf9e0d28941348f6448114df"
+    }
+  ],
+  "deployed_model_sha256": {
+    "Arabic.traineddata": "a80454f72df35c6f52550551dd69b8521ea6a62d834396d1c7dce4c35493902e",
+    "eng.traineddata": "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba",
+    "fas.traineddata": "99e420969b5ddd2cb135b416316a7ed417c59c4faf9e0d28941348f6448114df"
+  },
+  "engine_version": "tesseract v5.5.3.20260724",
+  "tesseract_model_metadata": {
+    "fas": "LSTM: network=[1,48,0,1Ct3,3,16Mp3,3Lfys64Lfx96Lrx96Lfx192O1c1], int_mode=0, recoding=1, iteration=896400, sample_iteration=897843, null_char=2, learning_rate=0.001, momentum=0.5, adam_beta=0.999\nLayer Learning Rates: :0(Input)=0.001, :1:0(Convolve)=0.001, :1:1(ConvNL)=0.00025, :2(Maxpool)=0.001, :3:0(Lfys64)=0.00025, :4(Lfx96)=0.00025, :5:0(Lrx96)=0.00025, :6(Lfx192)=0.00025, :7(Output)=0.00025",
+    "eng": "LSTM: network=[1,36,0,1Ct3,3,16Mp3,3Lfys64Lfx96Lrx96Lfx512O1c1], int_mode=0, recoding=1, iteration=814100, sample_iteration=814136, null_char=110, learning_rate=0.001, momentum=0.5, adam_beta=0.999\nLayer Learning Rates: :0(Input)=0.001, :1:0(Convolve)=0.001, :1:1(ConvNL)=0.0005, :2(Maxpool)=0.001, :3:0(Lfys64)=0.0005, :4(Lfx96)=0.0005, :5:0(Lrx96)=0.0005, :6(Lfx512)=0.0005, :7(Output)=0.0005"
+  },
+  "active_service_observation": {
+    "source_root": "E:\\GomrokOCR\\releases\\52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "executable": "C:\\Program Files\\Python311\\python.exe",
+    "flags": {
+      "OCR_PIPELINE_MODE": "UNSET",
+      "OCR_ACCURACY_MODE": "UNSET",
+      "OCR_TESSERACT_ONLY": "1",
+      "OMP_THREAD_LIMIT": "2"
+    },
+    "storage": {
+      "OCR_DATA_DIR": "E:\\GomrokOCR\\data",
+      "OCR_TEMP_DIR": "E:\\GomrokOCR\\temp",
+      "OCR_LOG_DIR": "E:\\GomrokOCR\\logs",
+      "OCR_TESSDATA_DIR": "E:\\GomrokOCR\\releases\\52e15ac8ac125993cba5974cdf3d3249bf9524c1\\tessdata"
+    },
+    "waitress_loaded_version": "UNKNOWN; cold executable has no installed distribution metadata",
+    "adjacent_venv_is_not_active_executable": true
+  },
+  "drive_snapshot": {
+    "C:/": {
+      "total_bytes": 214641405952,
+      "free_bytes": 7534055424
+    },
+    "E:/": {
+      "total_bytes": 214746263552,
+      "free_bytes": 36417040384
+    }
+  },
+  "harness_sha256": "e529bd3a9f3df4df5200638c24de3634f7f3ada622b0b80f0031968d733bc0c5",
+  "adjacent_venv_versions": {
+    "Flask": "3.1.3",
+    "numpy": "2.4.6",
+    "opencv-python-headless": "5.0.0.93",
+    "psutil": "7.2.2",
+    "PyMuPDF": "1.28.2",
+    "waitress": "3.0.2",
+    "openpyxl": "NOT_INSTALLED",
+    "paddleocr": "NOT_INSTALLED",
+    "paddlex": "NOT_INSTALLED",
+    "paddlepaddle": "NOT_INSTALLED"
+  },
+  "cold_active_executable_versions": {
+    "Flask": "3.1.3",
+    "numpy": "2.4.6",
+    "opencv-python-headless": "5.0.0.93",
+    "psutil": "7.2.2",
+    "PyMuPDF": "1.28.2",
+    "waitress": "NOT_INSTALLED",
+    "openpyxl": "NOT_INSTALLED",
+    "paddleocr": "NOT_INSTALLED",
+    "paddlex": "NOT_INSTALLED",
+    "paddlepaddle": "NOT_INSTALLED",
+    "ruff": "0.16.8",
+    "Pillow": "12.3.0",
+    "arabic-reshaper": "3.0.1",
+    "python-bidi": "0.6.11"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "tests": 174,
+  "elapsed_seconds": 29.233,
+  "failures": [
+    {
+      "test": "test_uncertainty_contract.UncertaintyContractTests.test_high_confidence_disagreement_reaches_page_json_and_review",
+      "category": "AssertionError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "successful": false
+}

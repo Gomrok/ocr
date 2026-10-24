@@ -1,0 +1,13 @@
+{
+  "production_source_files_checked": 52,
+  "production_source_changes": [],
+  "health": {
+    "status": "ok",
+    "release": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "engine": "tesseract",
+    "active_jobs": 0
+  },
+  "production_execution_for_tests": false,
+  "production_deploy": false,
+  "model_installations": 0
+}

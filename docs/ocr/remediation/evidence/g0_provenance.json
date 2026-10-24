@@ -1,0 +1,118 @@
+{
+  "date_utc": "2026-10-24T17:08:18.336030+00:00",
+  "production_root_exists": true,
+  "production_source_hashes": {
+    "make_bench_docs.py": "83dc5240f84d2c30fbc6d7d12db02f1b984103ae8da03143808da1c6a352e43e",
+    "make_sample_pdf.py": "9aea49ffd92e08be636046eb1883dbec225ce826a1bb2e24b2224137e89e7dc3",
+    "make_table_pdf.py": "5aa15af1b270b84fbfdb8b82c41feaf73ed130aa4b7aaba3281bddfcfc95e74b",
+    "ocr_bot.py": "af245cce21bbb24806ed034fa31289eae29fb9fc404c0dab2fd3c80682f063a7",
+    "requirements-candidate.txt": "66e93680387791aca1956eb227625e1ad21faba5bfab2c92faf623202087197b",
+    "requirements.txt": "40db145d851ca0b154038b42e445b17d793742f7c4806b2f62f551fa3607291f",
+    "run_benchmark.py": "98ad155ed7d5f38053e4d08cf008e1c30388b95a6d04c809719a3b1b2a342269",
+    "serve.py": "a8ff357289f196897701a2e17db5c63cc5f91cf314edf6195e190c40a767a3bd",
+    "web_app.py": "e580fc719689bf14cd6d7b6a9a737e29d5f446c751badbc58ad9eb34c7f3e745",
+    "ocr_pipeline\\benchmark.py": "f5c721601830697203cf83eeebabb099491c84364cb13590a9fc59d8de801f4a",
+    "ocr_pipeline\\engines.py": "2a743e6623e5bef50282f0d74c87f3344529fdc9fdf73cae1fc3fb23acdde844",
+    "ocr_pipeline\\evaluation.py": "0e8c6e3843c78ae28b13fc82da8d6e40666d8a0643b354c388b78795603fcebf",
+    "ocr_pipeline\\layout.py": "d902ef720895252fe048a13636e9f8f4d7660cff6e853d447c214a4115b42f70",
+    "ocr_pipeline\\metrics.py": "6b82f8f7e9bceff691cbfee4b2228bf0c1004ec033176a515bc4d8dc14c19203",
+    "ocr_pipeline\\native_pool.py": "9841da3bcbe12ecbb123dd881753c8a063b1c57956828ee6d96fca03b8a8112b",
+    "ocr_pipeline\\pipeline.py": "afc68413cd800889d2dc7e02d7ac8280d372f8057d6897386db068691259173a",
+    "ocr_pipeline\\preprocess.py": "3402a70086c1ec2e59e9f686c4f2cd578ec8cd682e5da87d63fafba32876e88c",
+    "ocr_pipeline\\quality.py": "023a8d524e5422fb3dd72bf7f7469931fe6eecf264fa39637d1b3323396ee1d6",
+    "ocr_pipeline\\render.py": "a03bdf07ef0cc3883730180bb57b86842c7954a088d54f067b31ac2a698aace4",
+    "ocr_pipeline\\review.py": "48b2ba6ecbd1d9d9f6f85ab98776165cfd335f5392e166db33a8d1170ed44d2d",
+    "ocr_pipeline\\tables.py": "a06ab13a6ad94fe9ebb981440ab31a5b14a71953f1571ffdabb082ebac8ca5ee",
+    "ocr_pipeline\\__init__.py": "998a43cbb6ba257d76a89e396a3cdb62832d8eb9f0911421a45ad4e3e0dd757a",
+    "ocr_pipeline\\precision\\engine.py": "48d6c8107dbab8550f499b2784b4ce747d2898d267e5d9e43420534e243f886f",
+    "ocr_pipeline\\precision\\extraction.py": "5bba2eabf48c7d038971c9be2961f5eb0c009ca33c89efbf4bc2ec40557e4f17",
+    "ocr_pipeline\\precision\\imaging.py": "75b3d7948b381b719a1814e06aef041855a5c09cd6d48f9264c1c019da3aacaf",
+    "ocr_pipeline\\precision\\profiles.py": "42e71f9445dce7ccefaf287db769552eabbce0bdd598d844831ab974ecda8269",
+    "ocr_pipeline\\precision\\__init__.py": "779f6c75f6c1a6ccd8a72ac4cd3728667acc2386cf534bf573ab55c5d56809b0",
+    "scripts\\evaluate_extractions.py": "bbc1451362a5f565dbb24143983564f8b3560606d95eb5344ccb548bcdfef1dd",
+    "scripts\\run_isolated_tests.py": "337d7436c45d4151ec142f9541b439abc418b9412fcded6915346fd3b52dc2a9",
+    "static\\dashboard.css": "2b691ba0947c55e982777d9dab6795c205ddeab0b98f5bfa65fcec62d4b3dd29",
+    "static\\dashboard.js": "7c2fea9d2b26e1214555b9e62336f7016db08f52f38100d2cbe78fa2f3a237dc",
+    "static\\review.css": "f3ddaad8d3eddd52d9ca888b04fe2a24a1f0dd8c293f5c407c973eb684e35610",
+    "static\\review.js": "69e39ea105346c3135fc3ede38e18d838dd9d295f1efb9cc0551e067c563a011",
+    "static\\fonts\\OFL.txt": "e6f4ce7b6c830d5a25a4f8ac777c267cd7d3c180bc2a7150ca57cbb9b280c4b7",
+    "static\\fonts\\Vazir-OFL.txt": "d5107670e488db11a9612b44163d065b26265a69db9755157d5af099d902c528",
+    "templates\\dashboard.html": "8a4f2632b7182eb458c3f75a59b54cc38b307fa43fa8839e0f8badafff6ffb38",
+    "templates\\review.html": "c219ee76bdc03c43831bc55bb3c638fc883623dec593d95355278d76063d2448",
+    "tests\\test_accuracy.py": "db65eb7fac0a213f45b5db26a80857384af205d0d0ab1fae27724d5e385aad8d",
+    "tests\\test_dpi.py": "a1ca820aaafb88f98363b48cc67c6dbdf1991fa388b5eb6513b262bee84368ac",
+    "tests\\test_empty_render.py": "e8ba3c390931c5cc1ca18fe87b11e2ca53e0d2d9b413f5ed2e1f33a5716e5e5b",
+    "tests\\test_engines.py": "54799520d55eef239c7ec1dbe145dd178554bfa7e20d1b0e5a6fc60b65c0092c",
+    "tests\\test_evaluation_runner.py": "d8ebe021e947c5329eb1ea097e75b776b4a1eb25a706289a752232beaebcbb0d",
+    "tests\\test_layout.py": "fc54e2ddbe64be489d05007d08e41219dc099707622f50abd08fdbc76205c27c",
+    "tests\\test_native_pool.py": "44e4fb995ec06cb019f610ae82928542b3e7cb9595894d9f64fd1eb7f9a05a0c",
+    "tests\\test_numeric_verification.py": "d7308a7932da38b9fafd3f7e552e37aa280bf4e0b841058d3c3db5696aefd7af",
+    "tests\\test_performance.py": "cdb1beef475f8063f969c77c67f0e4597bf3d87691fa67cb6b484ef1506e5274",
+    "tests\\test_precision.py": "36a38ae403c6fe561f1c57f5749692da36fdd358b6d8790e5c3869c86123b322",
+    "tests\\test_quality.py": "469d0daa636e2f56e2e7d4051a5d1bcd4537856a4df2ca845aaeef344350aa79",
+    "tests\\test_review_routes.py": "4a2483737fc2ef7cf28e6f24ca0b4f3ec6c528edb87151ce117bc698a34738cf",
+    "tests\\test_storage_startup.py": "29ba91243bb321081f0b04d1b2e9c50b3f41bc99da87eb9abbc47f87f425720f",
+    "tests\\test_web.py": "d3f8f9bb04a9bd3fc6c9063e60b39b89d860ef636b423e971a766e97742cc968",
+    "tests\\isolation\\sitecustomize.py": "23faed597415cfabd0f9a51a72ea059c00ad9c98ec54d1c1f709b3c52245122f"
+  },
+  "capabilities": {
+    "serve.py": {
+      "working_exists": true,
+      "production_exists": true
+    },
+    "web_app.py": {
+      "working_exists": true,
+      "production_exists": true
+    },
+    "ocr_pipeline/render.py": {
+      "working_exists": true,
+      "production_exists": true
+    },
+    "ocr_pipeline/pipeline.py": {
+      "working_exists": true,
+      "production_exists": true
+    },
+    "ocr_pipeline/quality.py": {
+      "working_exists": false,
+      "production_exists": true
+    },
+    "ocr_pipeline/review.py": {
+      "working_exists": true,
+      "production_exists": true
+    },
+    "ocr_pipeline/tables.py": {
+      "working_exists": true,
+      "production_exists": true
+    },
+    "requirements.txt": {
+      "working_exists": true,
+      "production_exists": true
+    }
+  },
+  "python_packages": {
+    "Flask": "3.1.3",
+    "numpy": "2.4.6",
+    "opencv-python-headless": "5.0.0.93",
+    "psutil": "7.2.2",
+    "pymupdf": "1.28.2"
+  },
+  "memory_total": 50331086848,
+  "cpu_count": 24,
+  "offline_wheels_in_repo": 0,
+  "health": {
+    "active_jobs": 0,
+    "engine": "tesseract",
+    "release": "52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "status": "ok"
+  },
+  "active_process": {
+    "source_root": "E:\\GomrokOCR\\releases\\52e15ac8ac125993cba5974cdf3d3249bf9524c1",
+    "executable": "C:\\Program Files\\Python311\\python.exe",
+    "flags": {
+      "OCR_PIPELINE_MODE": "UNSET",
+      "OCR_ACCURACY_MODE": "UNSET",
+      "OMP_THREAD_LIMIT": "2",
+      "OCR_TESSERACT_ONLY": "1"
+    }
+  }
+}

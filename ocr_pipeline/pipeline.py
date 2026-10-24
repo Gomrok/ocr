@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """ارکستراتور پایپ‌لاین Production — مستر 2000DPI (بخش ۱ تا ۳ و ۹ تا ۱۳ و ۲۰ تا ۲۵ و ۲۷).
 
 جریان هر صفحه:
@@ -11,9 +10,14 @@
 """
 from __future__ import annotations
 
+import contextlib
+import copy
+import hashlib
 import json
+import logging
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -27,6 +31,8 @@ from . import preprocess as P
 from . import render as R
 from . import tables as T
 from .metrics import Metrics
+from .provenance import source_digest
+from .observations import carry_observations
 
 CONF_REVIEW = 0.75   # بخش ۲۷: زیر این اطمینان → needs_review
 WORK_DPI = 500      # تحلیل تا ۵۰۰ DPI؛ مسترهای کم‌وضوح دوباره کوچک نمی‌شوند.
@@ -39,7 +45,7 @@ def validate_text(raw: str) -> dict:
         issues.append("arabic_variants_present")
     if re.search(r"\.\.", raw.replace("...", "")):
         issues.append("suspicious_punctuation")
-    if re.search(r"[،,]\s*$", raw, re.M):
+    if re.search(r"[،,]\s*$", raw, re.MULTILINE):
         issues.append("trailing_separator")
     if re.search(r"[\u0600-\u06FF]\s[\u0600-\u06FF]\s[\u0600-\u06FF]\s[\u0600-\u06FF]"
                  r"\s[\u0600-\u06FF]\s[\u0600-\u06FF]", raw):
@@ -48,7 +54,8 @@ def validate_text(raw: str) -> dict:
 
 
 def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
-             debug_dir: Path | None = None, page_no: int = 1) -> dict:
+             debug_dir: Path | None = None, page_no: int = 1, *,
+             export_tables: bool = True) -> dict:
     """OCR یک صفحه از مستر — معماری ناحیه‌محور، بدون نگه‌داشتن چند نسخهٔ کامل."""
     with m.step("master_read"):
         img = master.read_full()          # مستر 2000DPI (حافظهٔ خط ۲)
@@ -75,8 +82,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             proc = P.normalize_contrast(proc)
             ops.append("contrast_normalization")
         if analysis["needs_deskew"]:
-            proc = P.deskew(proc, analysis["skew_angle"])
-            ops.append(f"deskew({analysis['skew_angle']})")
+            proc, applied = P.deskew_safe(proc, analysis["skew_angle"])
+            ops.append(f"deskew({analysis['skew_angle']})" if applied else "deskew_skipped_clipping_risk")
         if not clean_page and analysis["noisy"]:
             proc = P.denoise_preserve_dots(proc)
             ops.append("denoise_preserve_dots")
@@ -100,6 +107,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     table_files: list[str] = []
     low_conf = 0
     page_engines: set[str] = set()
+    region_observations=[]
 
     def _crop_from_master(bbox: tuple) -> np.ndarray:
         """برش ناحیه از مستر پیش‌پردازش‌شده (بخش ۱۰)."""
@@ -115,8 +123,9 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                                     dpi=master.effective_dpi)
             if tmodel:
                 tables_out.append(tmodel)
-                table_files.extend(T.write_table_outputs(
-                    tmodel, master.path.parent.parent / "tables", page_no=page_no))
+                if export_tables:
+                    table_files.extend(T.write_table_outputs(
+                        tmodel, master.path.parent.parent / "tables", page_no=page_no, xlsx_required=False))
             continue  # متن جدول از سلول‌ها بازسازی می‌شود (بخش ۱۰)
 
         with m.step("ocr"):
@@ -146,9 +155,14 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             if not results:
                 continue
             res = E.select_consensus(results)
+            region_observations.append({'region_id':f'p{page_no}:r{region_index}',
+                'bbox':list(region.bbox),'stage':'scale_consensus',
+                'candidates':copy.deepcopy(res.get('candidates',[])),
+                'uncertainty_reasons':res.get('uncertainty_reasons',[])})
             # HOCR identifiers restart on every subprocess. Namespace them by
             # region and recognition pass before merging words across crops.
             for word in res.get('words') or []:
+                word['region_id'] = f'p{page_no}:r{region_index}'
                 if word.get('line_id'):
                     word['line_id'] = f'{region_index}:primary:{word["line_id"]}'
             f = res["_scale"]
@@ -185,7 +199,12 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                             x["bbox"] = tuple(int((v - 30) * k) + 30 for v in bx)
                             ew.append(x)
                         if E.prefer_latin_region(res, r_eng):
+                            replacement = carry_observations(r_eng, res, stage='latin_region_repair')
                             mw, nch = ew, len(ew)
+                            for word in mw:
+                                word['needs_review'] = replacement['needs_review']
+                                word['uncertainty_reasons'] = replacement['uncertainty_reasons']
+                                word['candidates'] = replacement['candidates']
                         else:
                             mw, nch = E.merge_latin_secondary(res["words"], ew)
                         if nch:
@@ -194,8 +213,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                             res["engine"] = str(res.get("engine", "tesseract")) \
                                 + "+eng_repair"
                             page_engines.add("tesseract+eng_repair")
-                    except Exception:
-                        pass
+                    except (RuntimeError, OSError, ValueError):
+                        logging.getLogger(__name__).warning("Latin OCR repair did not complete")
             # نگاشت مختصات به مستر (بخش ۱۲): پدِ ۳۰ پیکسلیِ pad_white (در مقیاس
             # ارسالی) کم می‌شود — وگرنه همهٔ کادرها آفست می‌خورند و ترمیم/دیباگ
             # روی جای اشتباه برش می‌زند
@@ -214,12 +233,16 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
 
     # ── ساختار سطری متن صفحه از کلمات (بخش ۵ و ۲۱) ──
     words_all = E.merge_word_lists([words_all])
+    before_repairs = copy.deepcopy(words_all)
     with m.step('recognition_repair'):
         _repair_suspicious_words(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     with m.step("numeric_verification"):
         _recover_header_numbers(words_all, proc, engine_list, m, dpi=master.effective_dpi)
         _verify_text_numbers(words_all, proc, engine_list, m, dpi=master.effective_dpi)
     for w in words_all:
+        original = next((old for old in before_repairs if old.get('bbox') == w.get('bbox')), None)
+        if original is not None:
+            w.update(carry_observations(w, original, stage='page_repairs'))
         conf = w.get("confidence")
         if conf is not None and conf < CONF_REVIEW:
             w["needs_review"] = True
@@ -256,20 +279,28 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "blocks": [{"kind": r.kind, "bbox": list(r.bbox)} for r in regions],
         "lines": lines,
         "words": [{"text": E.display_text(w["text"]), "bbox": list(w["bbox"]),
+                   'logical_text': w['text'],
+                   'engine': w.get('engine', 'tesseract'),
+                   'region_id': w.get('region_id'),
                    "confidence": w.get("confidence"),
                    "raw_ocr_text": w.get("raw_ocr_text", w["text"]),
+                   'candidates':w.get('candidates',[]),
+                   'uncertainty_reasons':w.get('uncertainty_reasons',[]),
+                   'transformations':w.get('transformations',[]),
                    **({'line_id': w['line_id']} if w.get('line_id') else {}),
                    **({"numeric_verified": True} if w.get("numeric_verified") else {}),
                    **({"recognition_repaired": True} if w.get("recognition_repaired") else {}),
                    **({"needs_review": True} if w.get("needs_review") else {})}
                   for w in words_all],
         "raw_text": raw_text,
+        'observations':region_observations,
         "normalized_text": normalized,
         "normalized_en_digits": E.en_digits_only(normalized),
         "text": normalized,
         "digit_style": "persian",
         "tables": [{"table_id": t["table_id"], "rows": t["rows"],
                     "columns": t["columns"],
+                    "cells": t["cells"],
                     "markdown": T.markdown_table(t)} for t in tables_out],
         "confidence": page_conf,
         "engines": sorted(page_engines) if page_engines else [engine_list[0].name],
@@ -777,6 +808,8 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
         word["numeric_verified"] = not result.get('needs_review', False)
         word.setdefault("raw_ocr_text", original)
         if verified != original:
+            word.update(carry_observations(dict(word, text=verified), word,
+                                           stage='numeric_reread'))
             word["text"] = verified
             word["needs_review"] = True
 
@@ -838,6 +871,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
     cell_confs: dict = {}
     cell_needs_review: dict = {}
     original_readings: dict = {}
+    cell_evidence: dict = {}
     engines_used: set[str] = set()
     H, W = img_shape
     for (r, c, bbox) in T.cell_bboxes(grid_abs):
@@ -850,6 +884,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
         # بقایای خطوط شبکه پاک می‌شوند — وگرنه تحلیل چیدمان موتور می‌شکند (بخش ۱۰)
         crop = T.strip_grid_lines(crop_raw)
         res = _cell_ocr_best(engine_list, crop, m, dpi=dpi)
+        cell_evidence[(r,c)] = copy.deepcopy(res)
         engines_used.add(res.get("engine", "?"))
         if res.get("multipass"):
             m.inc("fallbacks")
@@ -911,6 +946,7 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
             res['needs_review'] = True
         if res.get("needs_review"):
             m.low_conf_regions += 1
+        cell_evidence[(r,c)] = carry_observations(dict(res,text=txt), cell_evidence[(r,c)], stage="cell_reread")
         cell_texts[(r, c)] = txt
         cell_confs[(r, c)] = conf
         if res.get("needs_review"):
@@ -920,6 +956,10 @@ def _ocr_table(region: L.Region, proc: np.ndarray,
                                 cell_needs_review)
     for cell in model['cells']:
         cell['raw_ocr_text'] = original_readings.get((cell['row'], cell['column']), '')
+        cell.update(carry_observations({'text':cell['normalized_text'],
+            'needs_review':cell['needs_review'],'confidence':cell['confidence']},
+            cell_evidence.get((cell['row'],cell['column']),{'text':cell['raw_ocr_text']}),stage='table_selection'))
+        cell['logical_text'] = cell_texts.get((cell['row'],cell['column']),'')
     return model
 
 
@@ -955,27 +995,39 @@ def _debug_table_image(master: R.MasterPage, regions, tables, debug_dir: Path,
 def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
                 api_key: str | None = None, force_tesseract: bool = False,
                 max_pages: int = 0, debug: bool = True,
-                langs: str = "fas", progress_cb=None) -> dict:
+                langs: str = "fas", progress_cb=None, quality_mode: str | None = None) -> dict:
     """Own native workers and PDF handles, including exceptional exits."""
     reuse = os.environ.get('OCR_PERSISTENT_ENGINE', '1') != '0'
-    with E.TesseractEngine(langs, reuse_model=reuse) as local, pymupdf.open(pdf_path) as doc:
+    mode = quality_mode or os.environ.get("OCR_ACCURACY_MODE", "legacy")
+    if mode not in ("legacy", "maximum_local"):
+        raise ValueError("Unknown OCR accuracy mode")
+    with contextlib.ExitStack() as stack:
+        local = stack.enter_context(E.TesseractEngine(langs, reuse_model=reuse))
+        doc = stack.enter_context(pymupdf.open(pdf_path))
+        secondary, secondary_error = None, None
+        if mode == "maximum_local":
+            from .paddle_engine import PaddleEngine
+            try:
+                secondary = stack.enter_context(PaddleEngine())
+            except (OSError, RuntimeError, ValueError):
+                secondary_error = "second_engine_unavailable"
         return _process_document(doc, local, pdf_path, out_dir, dpi, api_key,
-                                 force_tesseract, max_pages, debug, progress_cb)
+                                 force_tesseract, max_pages, debug, progress_cb,
+                                 secondary, secondary_error, mode)
 
 
 def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
-                       force_tesseract, max_pages, debug, progress_cb):
+                       force_tesseract, max_pages, debug, progress_cb,
+                       secondary=None, secondary_error=None, quality_mode="legacy"):
     """پردازش کامل یک PDF — مستر 2000DPI (بخش ۳۰)."""
     t0 = time.perf_counter()
+    job_deadline = time.monotonic() + 1800
+    code_digest = source_digest()
     out_dir.mkdir(parents=True, exist_ok=True)
     master_dir = out_dir / "master"
     master_dir.mkdir(parents=True, exist_ok=True)
 
     engine_list: list[E.OCREngine] = []
-    if not force_tesseract:
-        key = api_key or os_key()
-        if key:
-            engine_list.append(E.GoogleVisionEngine(key))
     engine_list.append(local_engine)
     engine = E.pick_engine(engine_list)
 
@@ -988,29 +1040,84 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
 
     for i in range(n_pages):
         m = Metrics()
+        local_engine.deadline = min(job_deadline, time.monotonic()+300)
         engine_before = engine_list[-1].statistics()
         try:
-            with m.step("render"):
-                master = R.render_master(doc[i], i + 1, master_dir, dpi=dpi)
-            res = ocr_page(master, engine_list, m,
-                           out_dir / "debug" if debug else None, i + 1)
+            if time.monotonic() >= job_deadline:
+                raise TimeoutError('OCR_JOB_DEADLINE_EXCEEDED')
+            from .review import DISK_RESERVE
+            rw, rh, _ = R.estimate_render(doc[i], dpi)
+            raster_bytes = min(rw * rh, int(R.MAX_RENDER_MP * 1_000_000))
+            # TIFF compression is not assumed: reserve room for the master
+            # and exports before writing any new page artifacts.
+            if shutil.disk_usage(out_dir).free < DISK_RESERVE + raster_bytes * 2 + 4 * 1024**2:
+                raise OSError("Insufficient space for this page and the safety reserve")
+            if progress_cb:
+                progress_cb({"type": "stage", "page": i+1, "stage": "render"})
+            assessment = None
+            if os.environ.get('OCR_PDF_TEXT_FIRST') == '1':
+                from .pdf_text import inspect_page, native_page
+                try:
+                    with m.step('native_text_assessment'):
+                        assessment = inspect_page(doc[i])
+                except (RuntimeError, ValueError, TypeError):
+                    assessment = {'accepted': False, 'reasons': ['native_assessment_failed']}
+            if assessment and assessment['accepted']:
+                res = native_page(doc[i], i+1, dpi, m, assessment)
+            else:
+                with m.step("render"):
+                    master = R.render_master(doc[i], i + 1, master_dir, dpi=dpi)
+                if progress_cb:
+                    progress_cb({"type": "stage", "page": i+1, "stage": "primary_ocr"})
+                res = ocr_page(master, engine_list, m,
+                              out_dir / "debug" if debug else None, i + 1, export_tables=False)
+                if assessment:
+                    res['text_first'] = assessment
+            if quality_mode == "maximum_local":
+                if progress_cb:
+                    progress_cb({"type": "stage", "page": i+1, "stage": "independent_review"})
+                if secondary:
+                    from .precision import enhance_page
+                    before_precision = time.perf_counter()
+                    try:
+                        res = enhance_page(doc[i], copy.deepcopy(res), local_engine, secondary)
+                    except (OSError, RuntimeError, ValueError):
+                        res.setdefault("precision_warnings", []).append("second_engine_failed")
+                        res["low_confidence_words"] = max(1,res.get("low_confidence_words",0))
+                    res["precision_seconds"] = round(time.perf_counter()-before_precision,2)
+                else:
+                    res["precision_warnings"] = [secondary_error or "second_engine_unavailable"]
+                    res["low_confidence_words"] = max(1,res.get("low_confidence_words",0))
+            # Exports are generated only from the selected final page data.
+            # A failed export makes the page fail; its partial files are not published.
+            if progress_cb:
+                progress_cb({"type": "stage", "page": i+1, "stage": "exports"})
+            res["_table_files"] = []
+            for table in res.get("tables", []):
+                res["_table_files"].extend(T.write_table_outputs(table, out_dir / "tables", page_no=i+1, xlsx_required=False))
+            res['exports']={'xlsx':{'status':'unavailable' if any(
+                t.get('export_status',{}).get('xlsx',{}).get('status')=='unavailable' for t in res.get('tables',[]))
+                else 'available' if res.get('tables') else 'not_applicable'}}
             res["metrics"].update({key: value - engine_before[key]
                                    for key, value in engine_list[-1].statistics().items()})
             res["filename"] = pdf_path.name
-            for f in res.pop("_table_files", []):
-                all_table_files.append(f)
+            all_table_files.extend(res.pop("_table_files", []))
             pages_res.append(res)
             if progress_cb:
                 progress_cb({"type": "page_ok", "page": i + 1,
                              "words": len(res.get("words", [])),
                              "needs_review": bool(res.get("low_confidence_words")),
+                             "warnings": res.get("precision_warnings", []),
+                             "export_warnings": ['xlsx_unavailable'] if res['exports']['xlsx']['status']=='unavailable' else [],
                              "tables": len(res.get("tables", [])),
                              "source": (res.get("engines") or [engine.name])[0]})
-        except Exception as exc:  # noqa: BLE001
-            pages_res.append({"page": i + 1, "error": str(exc),
+        except Exception as exc:
+            logging.getLogger(__name__).error("OCR page %s failed (%s)", i + 1, type(exc).__name__)
+            error = "استخراج این صفحه انجام نشد."
+            pages_res.append({"page": i + 1, "error": error,
                               "filename": pdf_path.name, "metrics": m.report()})
             if progress_cb:
-                progress_cb({"type": "page_error", "page": i + 1, "error": str(exc)})
+                progress_cb({"type": "page_error", "page": i + 1, "error": error})
         finally:
             m.stop()
 
@@ -1019,8 +1126,29 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
     (out_dir / f"{stem}.txt").write_text(txt, "utf-8")
     payload = {
         "document": {"filename": pdf_path.name, "pages": n_pages,
-                     "source_dpi": dpi, "engine": engine.name},
+                     "evaluation_kind": "full_pipeline",
+                     "source_digest": code_digest,
+                     'model_hashes': copy.deepcopy(local_engine.model_hashes),
+                     "model_manifest_sha256": (hashlib.sha256(
+                         (secondary.models/"manifest.json").read_bytes()).hexdigest()
+                         if secondary else None),
+                     "source_dpi": dpi, "engine": engine.name,
+                     "engines": sorted({name for p in pages_res for name in p.get("engines", [])}),
+                     "second_engine": {
+                         "requested": quality_mode == "maximum_local",
+                         "initialized": secondary is not None,
+                         "failed_pages": sum(any(w.startswith("second_engine_")
+                             for w in p.get("precision_warnings", [])) for p in pages_res)},
+                     "quality_mode": quality_mode, "local_only": not any(
+                         isinstance(e, E.GoogleVisionEngine) for e in engine_list)},
         "pages": pages_res,
+        "exports": {'xlsx': {'status':'unavailable' if any(p.get('exports',{}).get('xlsx',{}).get('status')=='unavailable' for p in pages_res)
+                              else 'available' if any(p.get('tables') for p in pages_res) else 'not_applicable',
+                              'required_dependency_ready':T.xlsx_available()}},
+        'budgets': {'job_cooperative_deadline_seconds': 1800, 'page_ocr_deadline_seconds': 300,
+                    'native_call_seconds': 90, 'cli_memory_mib': 768,
+                    'native_pool_memory_ceiling': 'NOT_ENFORCED',
+                    'render_deadline': 'NOT_ENFORCED'},
         "performance": {
             "total_seconds": round(time.perf_counter() - t0, 2),
             "peak_rss_mb": max((p.get("metrics", {}).get("peak_rss_mb", 0)
@@ -1036,6 +1164,16 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
             "failed_pages": sum(1 for p in pages_res if p.get("error")),
         },
     }
+    if os.environ.get('OCR_SCHEMA_V2') == '1':
+        from .contracts import build_contract
+        payload['schema_v2'] = build_contract(hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
+            pages_res, {'source_digest': code_digest, 'engine': engine.name,
+                        'model_hashes': local_engine.model_hashes})
+        from .fields import extract
+        extracted = extract(payload['schema_v2']['line_observations'],
+                            document_type=os.environ.get('OCR_DOCUMENT_SCHEMA', 'unknown'))
+        payload['schema_v2']['fields'] = extracted['fields']
+        payload['schema_v2']['extraction_status'] = extracted['status']
     (out_dir / f"{stem}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
     if progress_cb:
@@ -1048,11 +1186,8 @@ def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
 
 
 def os_key() -> str | None:
-    key = os.environ.get("GOOGLE_API_KEY")
-    if key:
-        return key
-    p = Path(__file__).resolve().parent.parent / "api_key.txt"
-    return p.read_text().strip() if p.is_file() else None
+    return None  # External OCR credentials are never read.
+
 
 
 def build_txt(pages: list[dict]) -> str:

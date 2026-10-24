@@ -1,0 +1,13 @@
+{
+  "tests": 172,
+  "elapsed_seconds": 29.128,
+  "failures": [
+    {
+      "test": "test_offline_contract.OfflineContractTests.test_private_temp_initialized_before_import",
+      "category": "AssertionError"
+    }
+  ],
+  "errors": [],
+  "skipped": [],
+  "successful": false
+}

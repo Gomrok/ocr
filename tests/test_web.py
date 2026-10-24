@@ -4,9 +4,11 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pymupdf
+
 import web_app as web
 
 
@@ -28,6 +30,7 @@ class WebTests(unittest.TestCase):
         self.patches = [patch.object(web, "DATA_DIR", self.root),
                         patch.object(web, "UPLOAD_DIR", self.uploads),
                         patch.object(web, "OUT_DIR", self.output),
+                        patch.object(web.shutil, "disk_usage", return_value=SimpleNamespace(free=8 * 1024**3)),
                         patch.object(web, "QUEUE_SLOTS", threading.BoundedSemaphore(2)),
                         patch.object(web.threading, "Thread")]
         for item in self.patches:
@@ -144,7 +147,7 @@ class WebTests(unittest.TestCase):
 
     def test_selected_dpi_is_forwarded_to_every_document_in_batch(self):
         with patch.object(web, "process_pdf", return_value={
-                "document": {"pages": 1}, "performance": {"failed_pages": 0}}) as process:
+                "document": {"pages": 1}, "performance": {"failed_pages": 0}, "pages": []}) as process:
             response = self.upload(dpi="250")
             job_id = response.json["job_id"]
             paths = [self.uploads / f"{job_id}_001.pdf", self.uploads / f"{job_id}_002.pdf"]
@@ -172,6 +175,28 @@ class WebTests(unittest.TestCase):
         web.QUEUE_SLOTS.acquire()
         web.QUEUE_SLOTS.acquire()
         self.assertEqual(self.upload().status_code, 503)
+
+    def test_low_space_rejects_upload_before_saving_or_starting_work(self):
+        with patch.object(web.shutil, "disk_usage", return_value=SimpleNamespace(free=1)):
+            self.assertEqual(self.upload().status_code, 503)
+        self.assertEqual(list(self.uploads.iterdir()), [])
+        self.assertEqual(web.JOBS, {})
+        self.assertEqual(self.upload().status_code, 200)
+
+    def test_deployment_drain_closes_new_uploads_and_counts_pending_admissions(self):
+        marker = self.root / "deployment-drain"
+        marker.touch()
+        self.assertEqual(self.upload().status_code, 503)
+        self.assertEqual(web.JOBS, {})
+        web.PENDING_OWNERS.add("admission-in-progress")
+        with patch.object(web.LOCAL_ENGINE, "available", return_value=True):
+            health = self.client.get("/healthz").json
+        self.assertTrue(health["drain_supported"])
+        self.assertTrue(health["draining"])
+        self.assertEqual(health["active_jobs"], 1)
+        web.PENDING_OWNERS.clear()
+        marker.unlink()
+        self.assertEqual(self.upload().status_code, 200)
 
     def test_health_reports_engine_availability(self):
         with patch.object(web.LOCAL_ENGINE, "available", return_value=True):

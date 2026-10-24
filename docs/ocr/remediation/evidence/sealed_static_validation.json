@@ -1,0 +1,92 @@
+{
+  "lint_new": {
+    "command": [
+      "C:\\Program Files\\Python311\\python.exe",
+      "-B",
+      "-m",
+      "ruff",
+      "check",
+      "ocr_pipeline/observations.py",
+      "ocr_pipeline/local_models.py",
+      "ocr_pipeline/contracts.py",
+      "ocr_pipeline/fields.py",
+      "ocr_pipeline/validators.py",
+      "ocr_pipeline/pdf_text.py",
+      "ocr_pipeline/benchmark.py",
+      "run_benchmark.py",
+      "tests\\test_benchmark_contract.py",
+      "tests\\test_data_contract.py",
+      "tests\\test_export_contract.py",
+      "tests\\test_offline_contract.py",
+      "tests\\test_uncertainty_contract.py",
+      "tests/test_validators.py",
+      "tests/test_fields.py",
+      "tests/test_glyph_safety.py",
+      "tests/test_pdf_text.py",
+      "tests/test_remediation_regressions.py",
+      "tests/test_readiness_contract.py",
+      "--output-format",
+      "concise"
+    ],
+    "exit_code": 0,
+    "output": "All checks passed!",
+    "stderr_present": false
+  },
+  "lint_fatal_runtime": {
+    "command": [
+      "C:\\Program Files\\Python311\\python.exe",
+      "-B",
+      "-m",
+      "ruff",
+      "check",
+      "ocr_pipeline",
+      "web_app.py",
+      "serve.py",
+      "ocr_bot.py",
+      "run_benchmark.py",
+      "tools/evaluate_accuracy.py",
+      "--select",
+      "F821,F822,F823,F811,E9",
+      "--output-format",
+      "concise"
+    ],
+    "exit_code": 0,
+    "output": "All checks passed!",
+    "stderr_present": false
+  },
+  "mypy_new": {
+    "command": [
+      "C:\\Program Files\\Python311\\python.exe",
+      "-B",
+      "-m",
+      "mypy",
+      "--follow-imports=skip",
+      "--ignore-missing-imports",
+      "ocr_pipeline/contracts.py",
+      "ocr_pipeline/fields.py",
+      "ocr_pipeline/validators.py",
+      "ocr_pipeline/pdf_text.py",
+      "ocr_pipeline/observations.py",
+      "ocr_pipeline/local_models.py",
+      "ocr_pipeline/benchmark.py"
+    ],
+    "exit_code": 0,
+    "output": "Success: no issues found in 7 source files",
+    "stderr_present": false
+  },
+  "javascript_syntax": {
+    "command": [
+      "node",
+      "--check",
+      "static/review.js"
+    ],
+    "exit_code": 0,
+    "output": ""
+  },
+  "syntax": {
+    "status": "PASS",
+    "files": 54,
+    "method": "ast.parse_in_memory_no_pyc"
+  },
+  "source_digest": "87b28f274b6d8042d0ea4cab3d5b0e226c73b220487a24dc64c8930519bed448"
+}

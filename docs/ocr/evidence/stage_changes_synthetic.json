@@ -1,0 +1,93 @@
+[
+  {
+    "case": "bench_persian",
+    "source_sha256": "4d75efce79b4732c94374f76625507cb837a3110b525a15a6abe14c2b008f0cf",
+    "implementation": "persian_ocr_project",
+    "source_unchanged": true,
+    "dpi": 2000,
+    "elapsed_seconds": 23.765,
+    "pages": 1,
+    "failed_pages": 0,
+    "strict": {
+      "cer": 0.04899777282850779,
+      "wer": 0.0875
+    },
+    "normalized": {
+      "cer": 0.0467706013363029,
+      "wer": 0.07317073170731707
+    },
+    "reference_characters": 449,
+    "reference_words": 80,
+    "numeric_token_reference_count": 5,
+    "numeric_token_multiset_matches": 1,
+    "numeric_token_extra_count": 5,
+    "identifier_reference_count": 3,
+    "identifier_exact_matches": 1,
+    "words": 80,
+    "word_review_count": 7,
+    "performance": {
+      "total_seconds": 23.62,
+      "peak_rss_mb": 784.2,
+      "avg_page_seconds": 23.62,
+      "ocr_calls": 65,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 132,
+      "fallbacks": 12,
+      "low_confidence_regions": 7,
+      "failed_pages": 0
+    },
+    "page_metrics": {
+      "timings_seconds": {
+        "render": 8.648,
+        "master_read": 5.048,
+        "working_image": 0.137,
+        "preprocess": 0.219,
+        "layout": 1.683,
+        "ocr": 6.792,
+        "recognition_repair": 0.0,
+        "numeric_verification": 0.61
+      },
+      "total_seconds": 23.15,
+      "peak_rss_mb": 784.2,
+      "ocr_calls": 65,
+      "fallbacks": 12,
+      "low_confidence_regions": 7,
+      "ocr_processes": 4,
+      "ocr_cache_hits": 0,
+      "ocr_native_calls": 132
+    },
+    "analysis": {
+      "pct_black": 0.0066,
+      "mean": 253.3,
+      "std": 17.7,
+      "low_contrast": true,
+      "dark_background": false,
+      "noisy": false,
+      "skew_angle": 0.0,
+      "needs_deskew": false
+    },
+    "page_quality": null,
+    "raw_text_normalized": {
+      "cer": 0.017817371937639197,
+      "wer": 0.06097560975609756
+    },
+    "synthetic_numeric_changes": [],
+    "preprocess_ops": [],
+    "regions": 7,
+    "tables": 0,
+    "effective_dpi": 2000,
+    "supervision": {
+      "status": "completed",
+      "exit_code": 0,
+      "wall_seconds_including_startup": 26.888,
+      "peak_tree_rss_mib_sampled": 803.4,
+      "tree_cpu_seconds_sampled_lower_bound": 42.297,
+      "average_core_equivalents_lower_bound": 1.573,
+      "peak_children": 5,
+      "rss_sample_interval_seconds": 0.1,
+      "memory_limit_gib": 8,
+      "deadline_seconds": 600
+    }
+  }
+]

@@ -1,0 +1,43 @@
+{
+  "legacy_wer_one_word_substitution": {
+    "reported": 0.5,
+    "token_wer": 0.5
+  },
+  "legacy_cer_missing_space": {
+    "reported": 0.2,
+    "space_sensitive_cer": 0.2
+  },
+  "legacy_numeric_duplicate_omission": {
+    "reported": 0.5,
+    "multiset_recall": 0.5
+  },
+  "legacy_numeric_order_reversal": {
+    "reported": 0.0,
+    "position_exact_match": 0
+  },
+  "region_disagreement": {
+    "result_needs_review": true,
+    "word_needs_review": true
+  },
+  "region_disagreement_caller": {
+    "low_confidence_words": 1,
+    "word_needs_review": [
+      true
+    ]
+  },
+  "latin_repair_uncertainty": {
+    "changes": 1,
+    "needs_review": true,
+    "raw_preserved": true
+  },
+  "isolated_four_pixel_mark": {
+    "ink_before": 4,
+    "ink_after": 4
+  },
+  "unicode_semantic_changes": {
+    "input": "أ إ ؤ ة ۀ ي ك A123",
+    "output": "أ إ ؤ ة ۀ ی ک A۱۲۳"
+  },
+  "zero_confidence_cell": 0.5,
+  "independent_low_confidence_agreement": true
+}

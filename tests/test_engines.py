@@ -32,10 +32,11 @@ class EngineTests(unittest.TestCase):
             self.assertIs(pick_engine([engine]), engine)
             docker.assert_not_called()
 
-    def test_docker_fallback_remains_available(self):
+    def test_docker_is_disabled_even_when_daemon_is_available(self):
         engine = TesseractEngine()
         with patch.object(engine, "native_ok", return_value=False), patch.object(engine, "docker_ok", return_value=True):
-            self.assertIs(pick_engine([engine]), engine)
+            with self.assertRaises(RuntimeError):
+                pick_engine([engine])
 
     def test_disabled_cloud_engine_is_not_retried(self):
         cloud = GoogleVisionEngine("not-a-real-key")
@@ -57,7 +58,7 @@ class EngineTests(unittest.TestCase):
             Path(command[2] + ".hocr").write_text(
                 "<span class='ocrx_word' title='bbox 10 20 80 40; x_wconf 95'>متن</span>", encoding="utf-8")
             return Mock(returncode=0)
-        with patch.object(engine, "native_ok", return_value=True), patch("ocr_pipeline.engines.subprocess.run", side_effect=execute):
+        with patch.object(engine, "native_ok", return_value=True), patch("ocr_pipeline.engines._run_local_command", side_effect=execute):
             result = engine.ocr_image(b"test input", psm=7)
         self.assertEqual(result["text"], "متن آزمایشی")
         self.assertEqual(result["words"][0]["confidence"], 0.95)
@@ -72,7 +73,7 @@ class EngineTests(unittest.TestCase):
                              "tessedit_char_whitelist " + whitelist + "\n")
             Path(command[2] + ".txt").write_text("۱۲۳۴۵", encoding="utf-8")
             return Mock(returncode=0)
-        with patch.object(engine, "native_ok", return_value=True), patch("ocr_pipeline.engines.subprocess.run", side_effect=execute):
+        with patch.object(engine, "native_ok", return_value=True), patch("ocr_pipeline.engines._run_local_command", side_effect=execute):
             self.assertEqual(engine.ocr_image(b"test", whitelist=whitelist)["text"], "۱۲۳۴۵")
 
     def test_numeric_whitelist_and_language_survive_all_retry_passes(self):

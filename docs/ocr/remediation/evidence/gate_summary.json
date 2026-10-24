@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "verdict": "PARTIAL",
+  "deploy_ready": false,
+  "source_digest": "87b28f274b6d8042d0ea4cab3d5b0e226c73b220487a24dc64c8930519bed448",
+  "tests": {
+    "tests": 205,
+    "elapsed_seconds": 44.96,
+    "failures": [],
+    "errors": [],
+    "skipped": [],
+    "successful": true
+  },
+  "quality_scope": "four_synthetic_pages_only",
+  "quality": "PASS_FOUR_SYNTHETIC_REGRESSION_ONLY",
+  "production_accuracy": "NOT_MEASURED",
+  "gates": {
+    "G0": {
+      "status": "PARTIAL"
+    },
+    "G1": {
+      "status": "PASS_LOCAL"
+    },
+    "G2": {
+      "status": "PARTIAL"
+    },
+    "G3": {
+      "status": "PARTIAL"
+    },
+    "G4": {
+      "status": "PARTIAL"
+    },
+    "G5": {
+      "status": "PARTIAL"
+    },
+    "G6": {
+      "status": "PARTIAL"
+    },
+    "G7": {
+      "status": "PARTIAL"
+    },
+    "G8": {
+      "status": "PARTIAL"
+    },
+    "G9": {
+      "status": "PARTIAL"
+    },
+    "P2": {
+      "status": "NOT_TESTED",
+      "reason": "no_approved_offline_runtime_model_and_corpus"
+    }
+  },
+  "blocked_dependencies": [
+    "openpyxl_real_export",
+    "jalali_calendar_library",
+    "paddle_runtime_models"
+  ],
+  "not_tested": [
+    "OS_egress_deny",
+    "full_P_W_route_quality_compatibility",
+    "representative_business_corpus",
+    "production_performance",
+    "cold_warm_P50_P95"
+  ],
+  "evidence": [
+    "sealed_tests.json",
+    "sealed_baseline.json",
+    "sealed_static_validation.json",
+    "sealed_change_inventory.json",
+    "sealed_production_integrity.json",
+    "sealed_quality_comparison.json"
+  ],
+  "no_model_dependency_installations": true,
+  "no_commit_push_deploy": true
+}

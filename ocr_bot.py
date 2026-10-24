@@ -50,50 +50,13 @@ def collect_pdfs(inputs):
 
 
 def run_benchmark(out_dir: str, gt_path: str):
-    from ocr_pipeline.benchmark import (cer, numeric_accuracy, table_accuracy, wer)
-    gt = json.loads(Path(gt_path).read_text("utf-8"))
-    # فرمت dict: {stem: {text, table_rows}} — یا لیست قدیمی [{file, text}]
-    items = ([{"file": k, **v} for k, v in gt.items()]
-             if isinstance(gt, dict) else gt)
-    print("\n📊 بنچمارک دقت (بخش ۲۶):")
-    agg = {"cer": [], "wer": [], "num": [], "cell": []}
-    for item in items:
-        stem = item["file"]
-        base = Path(out_dir, stem)
-        # CER روی متن JSON (بازسازی کلمه‌محور) — TXT جداکنندهٔ صفحه و جدول دارد
-        jf = base / f"{stem}.json"
-        if not jf.is_file():
-            print(f"  {stem}: خروجی یافت نشد")
-            continue
-        d = json.loads(jf.read_text("utf-8"))
-        hyp = "\n".join(p.get("text", "") for p in d.get("pages", []))
-        ref = item["text"]
-        c, w = cer(ref, hyp), wer(ref, hyp)
-        n = numeric_accuracy(ref, hyp)
-        agg["cer"].append(c)
-        agg["wer"].append(w)
-        agg["num"].append(n)
-        line = f"  {stem}: CER={c:.3f} WER={w:.3f} NumericAcc={n:.3f}"
-        if item.get("table_rows"):
-            tj = base / "tables" / "table_001.json"
-            if tj.is_file():
-                from ocr_pipeline.tables import rows_of
-                got_rows = rows_of(json.loads(tj.read_text("utf-8")))
-                ta = table_accuracy(item["table_rows"], got_rows)
-                agg["cell"].append(ta["cell_accuracy"])
-                line += (f" | TableCell={ta['cell_accuracy']:.3f} "
-                         f"Row={ta['row_accuracy']:.3f} "
-                         f"Struct={ta['structure_accuracy']:.3f}")
-            else:
-                line += " | جدولی استخراج نشد"
-        print(line)
-    if agg["cer"]:
-        print(f"\n  میانگین: CER={sum(agg['cer'])/len(agg['cer']):.3f} "
-              f"WER={sum(agg['wer'])/len(agg['wer']):.3f} "
-              f"NumericAcc={sum(agg['num'])/len(agg['num']):.3f}"
-              + (f" TableCellAcc={sum(agg['cell'])/len(agg['cell']):.3f}"
-                 if agg["cell"] else ""))
-    return agg
+    from ocr_pipeline.benchmark import evaluate_outputs
+    reference=json.loads(Path(gt_path).read_text("utf-8"))
+    if not isinstance(reference,dict):
+        reference={Path(item["file"]).stem:item for item in reference}
+    report=evaluate_outputs(reference,Path(out_dir))
+    print(json.dumps(report,ensure_ascii=True))
+    return report
 
 
 def main(argv=None) -> int:
@@ -104,23 +67,26 @@ def main(argv=None) -> int:
         return 1
     print(f"{len(pdfs)} فایل PDF — مستر {args.dpi}DPI\n")
 
+    failed = False
     for pdf in pdfs:
         out_dir = Path(args.out) / pdf.stem
-        print(f"▶ {pdf.name} → {out_dir}/")
+        print(f"{pdf.name} → {out_dir}/")
         payload = process_pdf(
             pdf, out_dir, dpi=args.dpi, api_key=args.api_key,
             force_tesseract=args.tesseract_only,
             max_pages=args.max_pages, debug=not args.no_debug, langs=args.langs)
         perf = payload.get("performance", {})
-        print(f"  ✅ {perf.get('avg_page_seconds', '?')}s/صفحه، "
+        failed = failed or bool(perf.get("failed_pages"))
+        print(f"  {perf.get('avg_page_seconds', '?')}s/صفحه، "
               f"RAM {perf.get('peak_rss_mb', '?')}MB، "
               f"جدول‌ها {sum(len(p.get('tables', [])) for p in payload['pages'])}، "
               f"کم‌اطمینان {perf.get('low_confidence_regions', 0)}، "
               f"خطاها {perf.get('failed_pages', 0)}")
 
     if args.benchmark:
-        run_benchmark(args.out, args.benchmark)
-    return 0
+        report = run_benchmark(args.out, args.benchmark)
+        failed = failed or report["status"] != "MEASURED"
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

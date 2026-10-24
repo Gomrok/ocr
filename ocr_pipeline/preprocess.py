@@ -67,6 +67,23 @@ def deskew(img: np.ndarray, angle: float) -> np.ndarray:
                           borderMode=cv2.BORDER_CONSTANT, borderValue=255)
 
 
+def deskew_safe(img: np.ndarray, angle: float):
+    """Keep the original canvas if rotating ink could clip a mark."""
+    ink = img < 200
+    ys = np.flatnonzero(ink.any(axis=1))
+    xs = np.flatnonzero(ink.any(axis=0))
+    if not len(xs) or not len(ys):
+        return img, False
+    h, w = img.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w/2, h/2), angle, 1)
+    corners = np.float64([[xs[0],ys[0],1],[xs[-1],ys[0],1],
+                          [xs[-1],ys[-1],1],[xs[0],ys[-1],1]]) @ matrix.T
+    if (corners[:,0].min()<2 or corners[:,1].min()<2
+            or corners[:,0].max()>w-3 or corners[:,1].max()>h-3):
+        return img, False
+    return deskew(img, angle), True
+
+
 def illumination_correct(img: np.ndarray) -> np.ndarray:
     """حذف سایه/روشنایی ناهمگون با تقسیم بر پس‌زمینهٔ بلور شده."""
     workers = min(4, max(1, (os.cpu_count() or 1) // 2))
@@ -90,12 +107,14 @@ def illumination_correct(img: np.ndarray) -> np.ndarray:
     return norm
 
 
-def denoise_preserve_dots(img: np.ndarray, max_cc_px: int = 6) -> np.ndarray:
-    """حذف نویز اسکنر فقط با حذف CC های خیلی ریز — نقطهٔ حروف فارسی حفظ می‌شود.
+def denoise_preserve_dots(img: np.ndarray, max_cc_px: int | None = None) -> np.ndarray:
+    """Conservative original-pixel fallback until a DPI/x-height policy is validated.
 
-    نقطهٔ حروف در 2000DPI معمولاً > 25px مربع است؛ max_cc_px=6 فقط نویز تک‌پیکسلی
-    و اسپکِ اسکنر را حذف می‌کند و به نقطه‌ها دست نمی‌زند.
+    Explicit max_cc_px retains the legacy experimental variant for ablation;
+    production callers use the default and never erase unclassified small marks.
     """
+    if max_cc_px is None:
+        return img.copy()
     bw = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
     _, labels, stats, _ = cv2.connectedComponentsWithStats(bw)
     # One lookup per pixel instead of scanning the entire 2000-DPI page for

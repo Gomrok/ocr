@@ -1,16 +1,19 @@
-import unittest
 import csv
 import io
 import sys
 import tempfile
-from types import SimpleNamespace
+import unittest
 from pathlib import Path
-from unittest.mock import patch, Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
 
-from ocr_pipeline import engines as E, pipeline as P, tables as T, preprocess as PRE
+from ocr_pipeline import engines as E
+from ocr_pipeline import pipeline as P
+from ocr_pipeline import preprocess as PRE
+from ocr_pipeline import tables as T
 from ocr_pipeline.metrics import Metrics
 
 
@@ -76,12 +79,18 @@ class AccuracyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first = T.build_table_model(1, ((0,50),(0,100)), {(0,0):'اول'}, {}, 'test')
             second = T.build_table_model(1, ((0,50),(0,100)), {(0,0):'دوم'}, {}, 'test')
-            with patch.object(T, 'to_xlsx', side_effect=ImportError('optional export unavailable')):
-                a = T.write_table_outputs(first, Path(directory), page_no=1)
-                b = T.write_table_outputs(second, Path(directory), page_no=2)
+            a = T.write_table_outputs(first, Path(directory), page_no=1, xlsx_required=False)
+            b = T.write_table_outputs(second, Path(directory), page_no=2, xlsx_required=False)
             self.assertFalse(set(a) & set(b))
             self.assertIn('اول', (Path(directory)/'page_001_table_001.csv').read_text('utf-8'))
             self.assertIn('دوم', (Path(directory)/'page_002_table_001.csv').read_text('utf-8'))
+
+    def test_missing_required_xlsx_export_is_not_silently_successful(self):
+        table = T.build_table_model(1, ((0,50),(0,100)), {(0,0):'متن'}, {}, 'test')
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(T, 'to_xlsx', side_effect=ImportError('required export unavailable')), \
+                self.assertRaises(ImportError):
+            T.write_table_outputs(table, Path(directory), page_no=1)
 
     def test_faded_inset_grid_is_removed_without_erasing_cell_ink(self):
         image = np.full((500,600), 240, np.uint8)
@@ -190,7 +199,7 @@ class AccuracyTests(unittest.TestCase):
         result = E.select_consensus([{'text': '120', 'confidence': .9},
                                      {'text': '۱۲۰', 'confidence': .91}])
         self.assertEqual(result['votes'], 2)
-        self.assertNotIn('needs_review', result)
+        self.assertFalse(result['needs_review'])
 
     def test_english_line_recovery_does_not_replace_confident_persian_prose(self):
         secondary = {'text': 'WEIGHT 25,450 KG', 'words': [

@@ -2,6 +2,9 @@ param(
     [string]$DeploymentRoot = 'C:\Websites\ocr.gomrok.org',
     [string]$Python = 'C:\Program Files\Python311\python.exe',
     [string]$Tesseract = 'C:\Tools\GomrokOCR\Tesseract\tesseract.exe',
+    [string]$AccuracyReport,
+    [string]$PaddlePython,
+    [string]$PaddleModels,
     [switch]$ProvisionDomain
 )
 $ErrorActionPreference = 'Stop'
@@ -18,6 +21,38 @@ if ($LASTEXITCODE -ne 0 -or -not $remoteHead -or $remoteHead.Split()[0] -ne $rev
 if (-not (Test-Path -LiteralPath $Tesseract -PathType Leaf)) { throw 'Install native Tesseract before deployment.' }
 $root = [IO.Path]::GetFullPath($DeploymentRoot).TrimEnd('\')
 if ($root -ne 'C:\Websites\ocr.gomrok.org') { throw 'Deployment target is outside the approved OCR application directory.' }
+if (-not $AccuracyReport -or -not $PaddlePython -or -not $PaddleModels) {
+    throw 'Provide passing automatic accuracy evidence and pre-provisioned private Paddle runtime/model paths.'
+}
+$privateOcrRoot = Join-Path $root 'local-ocr'
+foreach ($artifact in @($PaddlePython, $PaddleModels)) {
+    $resolved = (Resolve-Path -LiteralPath $artifact).Path
+    if (-not $resolved.StartsWith($privateOcrRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Paddle artifacts must be immutable versioned paths under the private local-ocr directory.'
+    }
+}
+$preflightPython = Join-Path $root 'runtime\.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $preflightPython)) { throw 'Provision the main runtime before this accuracy upgrade.' }
+& $preflightPython (Join-Path $sourceRoot 'tools\release_gate.py') --accuracy-report $AccuracyReport --python $PaddlePython --models $PaddleModels --storage $root
+if ($LASTEXITCODE -ne 0) { throw 'Release quality, offline model or disk-space gate failed. Production has not been changed.' }
+$drainPath = Join-Path $root 'shared\data\deployment-drain'
+$drainOwned = $false
+try {
+$previousTask = Get-ScheduledTask -TaskName 'GomrokOCR' -ErrorAction SilentlyContinue
+if ($previousTask) {
+    try { $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5 }
+    catch { throw 'Could not establish whether production has active jobs; deployment is blocked.' }
+    if (-not $oldHealth.PSObject.Properties['drain_supported'] -or -not $oldHealth.drain_supported) {
+        throw 'The running release cannot confirm closed upload admissions. Automatic deployment is blocked; a controlled maintenance handoff is required.'
+    }
+    # CreateNew must not replace an operator's existing maintenance marker.
+    $drainFile = [IO.File]::Open($drainPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $drainOwned = $true
+    $drainFile.Dispose()
+    $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5
+    if (-not $oldHealth.draining) { throw 'Upload admissions were not closed; deployment is blocked.' }
+    if ($oldHealth.active_jobs -gt 0) { throw 'Active OCR jobs must complete before deployment.' }
+}
 $release = Join-Path $root "releases\$revision"
 $shared = Join-Path $root 'shared'
 $proxyRoot = Join-Path $root 'iis'
@@ -77,7 +112,9 @@ try {
 } finally { Pop-Location }
 
 $settings = @{}
+$previousSettingsBytes = $null
 if (Test-Path -LiteralPath $settingsPath) {
+    $previousSettingsBytes = [IO.File]::ReadAllBytes($settingsPath)
     $previous = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
     foreach ($property in $previous.PSObject.Properties) { $settings[$property.Name] = $property.Value }
 }
@@ -93,19 +130,20 @@ $settings.OCR_ALLOWED_HOSTS = 'ocr.gomrok.org,127.0.0.1,localhost'
 $settings.OCR_DATA_DIR = Join-Path $shared 'data'
 $settings.OCR_TESSDATA_DIR = Join-Path $release 'tessdata'
 $settings.OCR_TESSERACT_ONLY = '1'
+$settings.OCR_LOCAL_ONLY = '1'
+$settings.OCR_ACCURACY_MODE = 'maximum_local'
+$settings.OCR_PADDLE_PYTHON = $PaddlePython
+$settings.OCR_PADDLE_MODELS = $PaddleModels
 $settings.TESSERACT_CMD = $Tesseract
 $settings.OMP_THREAD_LIMIT = '2'
-$localKey = Join-Path $sourceRoot 'api_key.txt'
-if (Test-Path -LiteralPath $localKey) { $settings.GOOGLE_API_KEY = (Get-Content -LiteralPath $localKey -Raw).Trim() }
-$settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
-
-$previousTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($previousTask) {
     try { $oldHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 5 }
-    catch { $oldHealth = $null }
-    if ($oldHealth -and $oldHealth.active_jobs -gt 0) { throw 'Active OCR jobs must complete before deployment.' }
+    catch { throw 'Could not safely establish idle state; deployment is blocked.' }
+    if (-not $oldHealth.draining) { throw 'Upload admissions reopened; deployment is blocked.' }
+    if ($oldHealth.active_jobs -gt 0) { throw 'Active OCR jobs must complete before deployment.' }
     Stop-ScheduledTask -TaskName $taskName
 }
+$settings | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
 $arguments = "-X utf8 -u `"$(Join-Path $release 'serve.py')`" --settings `"$settingsPath`" --release $revision"
 $action = New-ScheduledTaskAction -Execute $runtimePython -Argument $arguments -WorkingDirectory $release
 $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCAL SERVICE' -LogonType ServiceAccount
@@ -121,6 +159,7 @@ for ($attempt = 0; $attempt -lt 20; $attempt++) {
 }
 if (-not $healthy) {
     Stop-ScheduledTask -TaskName $taskName
+    if ($null -ne $previousSettingsBytes) { [IO.File]::WriteAllBytes($settingsPath, $previousSettingsBytes) }
     if ($previousTask) { Register-ScheduledTask -TaskName $taskName -Action $previousTask.Actions -Principal $previousTask.Principal -Settings $previousTask.Settings -Trigger $previousTask.Triggers -Force | Out-Null; Start-ScheduledTask -TaskName $taskName }
     throw 'Release health check failed; the previous task was restored when available.'
 }
@@ -174,3 +213,6 @@ if ($certificate) {
     } finally { $manager.Dispose() }
 }
 [pscustomobject]@{Release=$revision;PublicUrl='https://ocr.gomrok.org';Health=$healthy;ReleasePath=$release}
+} finally {
+    if ($drainOwned) { Remove-Item -LiteralPath $drainPath -ErrorAction Stop }
+}

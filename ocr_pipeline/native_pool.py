@@ -138,7 +138,7 @@ class NativePool:
         return all((directory / name).is_file() for name in
                    ('libtesseract-5.dll', 'libleptonica-6.dll'))
 
-    def recognize(self, png: bytes, psm: int, whitelist: str | None, language: str) -> tuple[str, str]:
+    def recognize(self, png: bytes, psm: int, whitelist: str | None, language: str, *, seconds=90) -> tuple[str, str]:
         if (len(png) < 24 or len(png) > 64 * 1024 * 1024
                 or png[:8] != b'\x89PNG\r\n\x1a\n' or png[12:16] != b'IHDR'):
             raise ValueError('Invalid native OCR image')
@@ -155,7 +155,7 @@ class NativePool:
                         raise RuntimeError('Native OCR pool is closed')
                     result = self.pool.apply_async(_recognize,
                         (self.directory, self.tessdata, png, psm, whitelist, language))
-                deadline = time.monotonic() + 90
+                deadline = time.monotonic() + min(90, max(0, seconds))
                 while True:
                     with self.lock:
                         if self.pool is None:

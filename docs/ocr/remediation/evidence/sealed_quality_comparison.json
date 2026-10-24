@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "source_digest": "87b28f274b6d8042d0ea4cab3d5b0e226c73b220487a24dc64c8930519bed448",
+  "cases": [
+    {
+      "case": "bench_persian",
+      "source_matches_final": true,
+      "strict_text_equal_baseline": true,
+      "numeric_equal_baseline": true,
+      "failed_pages_before": 0,
+      "failed_pages_after": 0,
+      "synthetic_source_unchanged": true
+    },
+    {
+      "case": "bench_mixed",
+      "source_matches_final": true,
+      "strict_text_equal_baseline": true,
+      "numeric_equal_baseline": true,
+      "failed_pages_before": 0,
+      "failed_pages_after": 0,
+      "synthetic_source_unchanged": true
+    },
+    {
+      "case": "bench_lowq",
+      "source_matches_final": true,
+      "strict_text_equal_baseline": true,
+      "numeric_equal_baseline": true,
+      "failed_pages_before": 0,
+      "failed_pages_after": 0,
+      "synthetic_source_unchanged": true
+    },
+    {
+      "case": "bench_table",
+      "source_matches_final": true,
+      "strict_text_equal_baseline": null,
+      "numeric_equal_baseline": true,
+      "failed_pages_before": 1,
+      "failed_pages_after": 0,
+      "synthetic_source_unchanged": true
+    }
+  ],
+  "status": "PASS_FOUR_SYNTHETIC_REGRESSION_ONLY",
+  "production_accuracy": "NOT_MEASURED"
+}

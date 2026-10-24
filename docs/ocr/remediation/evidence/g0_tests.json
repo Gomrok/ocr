@@ -1,0 +1,42 @@
+{
+  "tests": 154,
+  "elapsed_seconds": 28.771,
+  "failures": [
+    {
+      "test": "test_review.ReviewRoutesTests.test_csrf_revision_validation_and_authorized_revision_download",
+      "category": "AssertionError"
+    }
+  ],
+  "errors": [
+    {
+      "test": "test_accuracy.AccuracyTests.test_table_files_from_different_pages_cannot_overwrite_each_other",
+      "category": "ModuleNotFoundError"
+    },
+    {
+      "test": "test_review.ReviewStoreTests.test_another_service_process_cannot_overwrite_locked_review",
+      "category": "ModuleNotFoundError"
+    },
+    {
+      "test": "test_review.ReviewStoreTests.test_original_is_immutable_and_all_revision_exports_agree",
+      "category": "ModuleNotFoundError"
+    },
+    {
+      "test": "test_review.ReviewStoreTests.test_revisions_survive_fresh_reads_and_keep_previous_exports",
+      "category": "ModuleNotFoundError"
+    },
+    {
+      "test": "test_review.ReviewStoreTests.test_stale_revision_cannot_overwrite_user_work",
+      "category": "ModuleNotFoundError"
+    },
+    {
+      "test": "test_review.ReviewStoreTests.test_storage_exhaustion_during_export_removes_only_new_attempt",
+      "category": "ModuleNotFoundError"
+    },
+    {
+      "test": "test_review.ReviewStoreTests.test_two_concurrent_saves_publish_only_one_revision",
+      "category": "ModuleNotFoundError"
+    }
+  ],
+  "skipped": [],
+  "successful": false
+}

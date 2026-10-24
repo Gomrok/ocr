@@ -2,14 +2,13 @@
 """لایهٔ انتزاع موتور OCR + fallback چندموتوره + نرمال‌سازی + شناسه‌ها (بخش ۴ تا ۷ و ۱۵ و ۱۹).
 
 موتورها:
-  GoogleVisionEngine  — DOCUMENT_TEXT_DETECTION با کلید API (REST)
-  TesseractEngine     — fas داخل داکر، PSM انتخابی بر اساس نوع ناحیه
+  GoogleVisionEngine  — inert compatibility interface (external OCR disabled)
+  TesseractEngine     — native local CPU, installed models only
 
 خروجی استاندارد: dict کلمات + متن + اطمینان (بدون جعل اطمینان — بخش ۱۸).
 """
 from __future__ import annotations
 
-import base64
 import copy
 import hashlib
 import json
@@ -17,38 +16,36 @@ import logging
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import tempfile
 import threading
 import time
-import urllib.request
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 
 from .native_pool import NativePool
+from .observations import carry_observations
+from .benchmark import normalize_evaluation
+from .local_models import verify_models
+from .process_guard import run_worker
 
-VISION_URL = "https://vision.googleapis.com/v1/images:annotate"
-TESSERACT_IMAGE = "ocr-tesseract:fa"
+
+def _run_local_command(command, *, timeout):
+    code, _ = run_worker(command, memory_bytes=768*1024**2,
+                         seconds=min(90, timeout), output_limit=4096)
+    return SimpleNamespace(returncode=code)
 
 CONF_ACCEPT = 0.90      # بخش ۱۹
 CONF_RETRY = 0.75
 
 
-def _ssl_ctx():
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
-
-
 # ───────────────────── نرمال‌سازی (بخش ۴ و ۶) ─────────────────────
 
 AR_TO_FA = str.maketrans({
-    "ي": "ی", "ك": "ک", "ة": "ه", "ۀ": "ه", "أ": "ا", "إ": "ا", "ؤ": "و",
+    "ي": "ی", "ك": "ک",
     "٠": "۰", "١": "۱", "٢": "۲", "٣": "۳", "٤": "۴", "٥": "۵",
     "٦": "۶", "٧": "۷", "٨": "۸", "٩": "۹",
 })
@@ -112,7 +109,7 @@ def select_consensus(results: list[dict]) -> dict:
     """Equal vote counts must be decided by confidence, not candidate order."""
     groups: dict[str, list[dict]] = {}
     for result in results:
-        text = ' '.join(normalize_text(result.get('text', ''), normalize_digits=True).split())
+        text = ' '.join(normalize_evaluation(result.get('text', '')).split())
         if text:
             groups.setdefault(text, []).append(result)
     if not groups:
@@ -121,10 +118,17 @@ def select_consensus(results: list[dict]) -> dict:
     trusted = [items for items in groups.values() if max(map(result_confidence, items)) >= 0.85]
     group = max(trusted or groups.values(),
                 key=lambda items: (len(items), max(map(result_confidence, items))))
-    best = dict(max(group, key=result_confidence))
+    best = carry_observations(max(group,key=result_confidence),*results,
+                              stage='scale_consensus',reason='reading_disagreement' if len(groups)>1 else '')
     best['votes'] = len(group)
     if len(groups) > 1:
         best['needs_review'] = True
+    for word in best.get('words',[]):
+        if best.get('needs_review'):
+            word['needs_review']=True
+            word['uncertainty_reasons']=sorted(set(word.get('uncertainty_reasons',[])+best['uncertainty_reasons']))
+        if len(best.get('words',[]))==1:
+            word['candidates']=copy.deepcopy(best['candidates'])
     return best
 
 
@@ -235,6 +239,8 @@ def merge_word_lists(lists: list[list[dict]]) -> list[dict]:
         for k in kept:
             iou = _iou(w["bbox"], k["bbox"])
             if iou > 0.6:
+                combined=carry_observations(k,w,stage='overlap_merge')
+                k.update(combined)
                 if w["text"] == k["text"] or (w.get("confidence") or 0) <= (k.get("confidence") or 0):
                     dup = True
                 else:
@@ -246,6 +252,7 @@ def merge_word_lists(lists: list[list[dict]]) -> list[dict]:
                 cx2, cy2 = center(k["bbox"])
                 h = max(1, k["bbox"][3] - k["bbox"][1])
                 if abs(cy1 - cy2) < 0.6 * h and abs(cx1 - cx2) < 1.2 * h:
+                    k.update(carry_observations(k,w,stage="nearby_duplicate_merge"))
                     dup = True
                     break
         if not dup:
@@ -502,7 +509,7 @@ def merge_latin_secondary(fas_words: list[dict],
                 nw['raw_ocr_text'] = w.get('raw_ocr_text', raw)
                 nw['recognition_repaired'] = True
                 nw["engine"] = "tesseract+eng"
-                nw.pop("needs_review", None)
+                nw=carry_observations(nw,w,stage='latin_repair')
                 out.append(nw)
                 consumed[best_j] = True
                 repaired += 1
@@ -540,7 +547,7 @@ def merge_latin_secondary(fas_words: list[dict],
                 ne['raw_ocr_text'] = w.get('raw_ocr_text', w['text'])
                 ne['recognition_repaired'] = True
                 ne["engine"] = "tesseract+eng"
-                out[best_i] = ne
+                out[best_i] = carry_observations(ne,w,stage='latin_repair')
                 changes += 1
             continue
         if best_iou <= 0.3:
@@ -555,37 +562,12 @@ class GoogleVisionEngine(OCREngine):
     name = "google_vision"
 
     def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.available = True  # تا اولین شکست واقعی
+        # Compatibility interface only. Never retain credentials or create requests.
+        self.available = False
 
     def ocr_image(self, png: bytes, psm: int = 3,
                   whitelist: str | None = None) -> dict:
-        if not self.available:
-            raise RuntimeError("Google Vision is unavailable")
-        body = {"requests": [{
-            "image": {"content": base64.b64encode(png).decode("ascii")},
-            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-            "imageContext": {"languageHints": ["fa", "en"]},
-        }]}
-        req = urllib.request.Request(
-            f"{VISION_URL}?key={self.api_key}",
-            data=json.dumps(body).encode(), method="POST",
-            headers={"Content-Type": "application/json"})
-        last = None
-        for i in range(2):  # حداکثر ۲ تلاش (~۳ ثانیه) — fallback سریع به موتور بعدی
-            try:
-                with urllib.request.urlopen(req, timeout=120, context=_ssl_ctx()) as r:
-                    payload = json.load(r)
-                r0 = payload["responses"][0]
-                if "error" in r0:
-                    raise RuntimeError(r0["error"].get("message", "?"))
-                return self._parse(r0)
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                if i < 1:
-                    time.sleep(1)
-        self.available = False  # کل موتور غیرفعال می‌شود (صفحات بعدی مستقیم Tesseract)
-        raise RuntimeError(f"google_vision failed: {last}")
+        raise RuntimeError("EXTERNAL_OCR_DISABLED")
 
     @staticmethod
     def _parse(r0: dict) -> dict:
@@ -636,6 +618,9 @@ class TesseractEngine(OCREngine):
         self._pool_lock = threading.Lock()
         self._pool_starts = 0
         self._native_calls = 0
+        self.model_hashes = {}
+        self._model_stamp = None
+        self.deadline = None
         self.tessdata_dir = Path(os.environ.get("OCR_TESSDATA_DIR") or
                                  Path(__file__).resolve().parent.parent / "tessdata")
         candidates = [os.environ.get("TESSERACT_CMD", ""), "tesseract",
@@ -673,7 +658,7 @@ class TesseractEngine(OCREngine):
                                             self.tessdata_dir.resolve())
                     self._pool_starts += self._pool.workers
                 pool = self._pool
-            payload = pool.recognize(png, psm, whitelist, language)
+            payload = pool.recognize(png, psm, whitelist, language, seconds=self.remaining_seconds())
             with self._cache_lock:
                 self._native_calls += 1
             return payload
@@ -687,6 +672,17 @@ class TesseractEngine(OCREngine):
             return None
 
     def native_ok(self) -> bool:
+        try:
+            stamp = tuple((lang, (self.tessdata_dir / f'{lang}.traineddata').stat().st_size,
+                           (self.tessdata_dir / f'{lang}.traineddata').stat().st_mtime_ns)
+                          for lang in self.langs.split('+'))
+            if stamp != self._model_stamp:
+                self.model_hashes = verify_models(self.tessdata_dir, self.langs)
+                self._model_stamp = stamp
+                self._native_ok = None
+        except (OSError, RuntimeError):
+            self._native_ok = False
+            return False
         if self._native_ok is None:
             self._native_ok = False
             if self.executable and all((self.tessdata_dir / f"{lang}.traineddata").is_file()
@@ -700,16 +696,11 @@ class TesseractEngine(OCREngine):
         return self._native_ok
 
     def available(self) -> bool:
-        return self.native_ok() or self.docker_ok()
+        return self.native_ok()
 
     def docker_ok(self) -> bool:
-        if self._docker_ok is None:
-            try:
-                p = subprocess.run(["docker", "info"], capture_output=True, timeout=30)
-                self._docker_ok = p.returncode == 0
-            except Exception:  # noqa: BLE001
-                self._docker_ok = False
-        return self._docker_ok
+        """Registry/daemon execution is intentionally unsupported in this build."""
+        return False
 
     def crop_for_repair(self, x0: int, y0: int, x1: int, y1: int) -> bytes | None:
         """برش واژهٔ خراب از مستر + پد نسبی + مقیاس بهینه (بخش ۷ — ترمیم eng).
@@ -737,6 +728,10 @@ class TesseractEngine(OCREngine):
     def ocr_image(self, png: bytes, psm: int = 3,
                   whitelist: str | None = None, langs: str | None = None) -> dict:
         langs_eff = langs or self.langs
+        self.remaining_seconds()
+        # One verification per language/document; models live in read-only storage.
+        if any(lang not in self.model_hashes for lang in langs_eff.split('+')):
+            self.model_hashes.update(verify_models(self.tessdata_dir, langs_eff))
         key = (hashlib.sha256(png).digest(), psm, whitelist, langs_eff)
         with self._cache_lock:
             cached = self._cache.get(key)
@@ -745,7 +740,7 @@ class TesseractEngine(OCREngine):
                 self._cache_hits += 1
                 return copy.deepcopy(cached[0])
         native = self.native_ok()
-        if not native and not self.docker_ok():
+        if not native:
             raise RuntimeError("هیچ موتور محلی OCR در دسترس نیست")
         payload = self._pooled_read(png, psm, whitelist, langs_eff) if native else None
         if payload is None:
@@ -771,22 +766,16 @@ class TesseractEngine(OCREngine):
 
     def _ocr_subprocess(self, png, psm, whitelist, langs_eff, native):
         # گذر دوم لاتین‌محور: زبان متفاوت (مثل fas+eng) فقط در نواحی لاتین‌محور (بخش ۷)
+        if not native:
+            raise RuntimeError("DOCKER_OCR_DISABLED")
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
             tf.write(png)
             tmp_in = tf.name
         outdir = tempfile.mkdtemp()
         base = os.path.join(outdir, "o")
         try:
-            if native:
-                cmd = [self.executable, tmp_in, base]
-                data_path = str(self.tessdata_dir.resolve())
-            else:
-                cmd = ["docker", "run", "--rm",
-                       "-v", f"{tmp_in}:/tmp/page.png:ro",
-                       "-v", f"{outdir}:/io",
-                       "-v", f"{self.tessdata_dir.resolve()}:/tessdata:ro",
-                       TESSERACT_IMAGE, "tesseract", "/tmp/page.png", "/io/o"]
-                data_path = "/tessdata"
+            cmd = [self.executable, tmp_in, base]
+            data_path = str(self.tessdata_dir.resolve())
             cmd += ["-l", langs_eff, "--psm", str(psm),
                    "--tessdata-dir", data_path,
                    "-c", "tessedit_create_txt=1",
@@ -805,15 +794,21 @@ class TesseractEngine(OCREngine):
                     cmd += ["-c", f"tessedit_char_whitelist={whitelist}"]
             with self._cache_lock:
                 self._processes += 1
-            p = subprocess.run(cmd, capture_output=True, timeout=900)
+            p = _run_local_command(cmd, timeout=self.remaining_seconds())
             if p.returncode != 0:
-                raise RuntimeError("tesseract: " + p.stderr.decode(errors="replace")[:300])
+                raise RuntimeError("LOCAL_OCR_PROCESS_FAILED")
             text = Path(base + ".txt").read_text("utf-8")
             hocr = Path(base + ".hocr").read_text("utf-8") if Path(base + ".hocr").is_file() else ""
             return text, hocr
         finally:
             os.unlink(tmp_in)
             shutil.rmtree(outdir, ignore_errors=True)
+
+    def remaining_seconds(self):
+        remaining = 90. if self.deadline is None else min(90., self.deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError('OCR_DEADLINE_EXCEEDED')
+        return remaining
 
     def statistics(self) -> dict[str, int]:
         with self._cache_lock:
