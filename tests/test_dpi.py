@@ -60,7 +60,7 @@ class ResolutionTests(unittest.TestCase):
         cv2.rectangle(image, (12, 6), (16, 13), 0, -1)  # 40px of real low-DPI ink.
         metrics = Metrics()
         try:
-            with patch.object(pipeline.E, "ocr_many", return_value=[{"text": "۱"}, {"text": "۱"}]) as ocr:
+            with patch.object(pipeline.E, "ocr_many", return_value=[{"text": "۱", "confidence": .9}] * 2) as ocr:
                 low = pipeline._glyph_digit_ocr([], image, metrics, dpi=100)
                 self.assertEqual(low["text"], "۱")
                 self.assertEqual(len(ocr.call_args.args[1]), 2)

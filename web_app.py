@@ -20,6 +20,7 @@ import time
 import uuid
 import zipfile
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -27,10 +28,12 @@ from pathlib import Path
 import pymupdf
 from flask import Flask, g, jsonify, render_template, request, send_file, session
 
-from ocr_pipeline.pipeline import process_pdf
-from ocr_pipeline.engines import TesseractEngine
+from ocr_pipeline.engines import TesseractEngine, display_text
+from ocr_pipeline.job_store import ACTIVE_STATES, JobStore
+from ocr_pipeline.job_worker import run_isolated
 from ocr_pipeline.review import ReviewConflict, ReviewStore
 from ocr_pipeline.quality import page_quality, unknown_quality
+from ocr_pipeline.release_identity import current_runtime, digest, resource_limits
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # سقف ۵۰۰ مگابایت
@@ -61,15 +64,24 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 JOBS: dict[str, dict] = {}
 LOCK = threading.Lock()
-RUN_LOCK = threading.Lock()  # یک پردازش در هر لحظه (مستر 2000DPI سنگین است)
 QUEUE_SLOTS = threading.BoundedSemaphore(2)
+PDF_IO_LOCK = threading.Lock()
+OCR_RESOURCES = threading.Condition()
+OCR_WAITERS = deque()
+LIMITS = resource_limits(os.environ)
+OCR_WORKERS = LIMITS["workers"]
+OCR_RAM_MIB = LIMITS["ram_mib"]
+OCR_USED = 0
+OCR_ACTIVE = 0
 RATE_LOCK = threading.Lock()
 UPLOAD_TIMES: dict[str, deque] = {}
 PENDING_OWNERS: set[str] = set()
 LOCAL_ENGINE = TesseractEngine("fas")
 MAX_BATCH_PAGES = 300
-DPI_LEVELS = (100, 250, 500, 1000, 1500, 2000)
-DEFAULT_DPI = 2000
+DPI_LEVELS = (100, 250, 300, 400, 500, 1000, 1500, 2000)
+DEFAULT_DPI = int(os.environ.get("OCR_DEFAULT_DPI", 2000))
+if DEFAULT_DPI not in DPI_LEVELS:
+    raise RuntimeError("Unknown OCR_DEFAULT_DPI")
 PREVIEW_SLOTS = threading.BoundedSemaphore(2)
 REVIEW_SLOTS = threading.BoundedSemaphore(2)
 QUALITY_SLOTS = threading.BoundedSemaphore(2)
@@ -83,6 +95,48 @@ if PIPELINE_MODE not in ("legacy", "compare", "candidate"):
 
 def _review_store():
     return ReviewStore(DATA_DIR / "reviews")
+
+
+def _store():
+    return JobStore(DATA_DIR)
+
+
+def _owned_job(job_id, owner):
+    if not owner or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return None
+    current = JOBS.get(job_id)
+    if current:
+        return current if current["owner_id"] == owner else None
+    return _store().get(job_id, owner)
+
+
+@contextmanager
+def _ocr_reservation(dpi):
+    global OCR_USED, OCR_ACTIVE
+    # High-resolution jobs may use the full RAM allowance; two small scans
+    # may run together. FIFO ordering prevents large scans from starving.
+    units = OCR_WORKERS if dpi >= 1000 else 1
+    ticket = object()
+    with OCR_RESOURCES:
+        OCR_WAITERS.append(ticket)
+        OCR_RESOURCES.wait_for(lambda: OCR_WAITERS[0] is ticket and OCR_USED + units <= OCR_WORKERS)
+        OCR_WAITERS.popleft()
+        OCR_USED += units
+        OCR_ACTIVE += 1
+        OCR_RESOURCES.notify_all()
+    try:
+        ram_mib = (OCR_RAM_MIB - 192) * units // OCR_WORKERS
+        yield {
+            "ram_mib": ram_mib,
+            "render_budget_mp": min(400.0, (ram_mib - 320) * 2**20 / 10_000_000),
+            "native_workers": LIMITS["native_workers"],
+            "omp_threads": LIMITS["omp_threads"],
+        }
+    finally:
+        with OCR_RESOURCES:
+            OCR_USED -= units
+            OCR_ACTIVE -= 1
+            OCR_RESOURCES.notify_all()
 
 
 def _bounded_review(function):
@@ -190,6 +244,8 @@ def _make_cb(job_id: str, fname: str, document_index: int | None = None):
                 job["log"].append(
                     f"[{fname}] {event['pages_ok']}/{event['pages']} صفحه، "
                     f"{event['words']} کلمه در {event['seconds']} ثانیه")
+            job["log"] = job["log"][-120:]
+            _store().save(job_id, job)
     return cb
 
 
@@ -210,9 +266,10 @@ def _finish_document(job_id: str, document_index: int, outcome: str,
         summary["state"] = "partial" if outcome == "done" and summary["failed_pages"] else outcome
         if outputs:
             summary["outputs"] = outputs
+        _store().save(job_id, job)
 
 
-def _collect_outputs(stem_dir: Path, stem: str, *, extraction_revision=None) -> list[str]:
+def _collect_outputs(stem_dir: Path, stem: str, *, extraction_revision=None, pages=None) -> list[str]:
     """نسبی: TXT + JSON + جدول‌ها + دیباگ این سند."""
     names = [f"{stem}/{stem}.txt", f"{stem}/{stem}.json"]
     revision = extraction_revision
@@ -221,6 +278,9 @@ def _collect_outputs(stem_dir: Path, stem: str, *, extraction_revision=None) -> 
         directory = stem_dir / "extractions" / revision / "tables"
         if directory.is_dir():
             names.extend(f"{stem}/extractions/{revision}/tables/{path.name}" for path in sorted(directory.iterdir()) if path.is_file())
+        return names
+    if pages is not None and all("artifacts" in page or page.get("error") for page in pages):
+        names += [f"{stem}/{name}" for page in pages for name in page.get("artifacts", [])]
         return names
     for sub in ("tables", "debug"):
         d = stem_dir / sub
@@ -232,86 +292,140 @@ def _collect_outputs(stem_dir: Path, stem: str, *, extraction_revision=None) -> 
 
 
 def _zip_outputs(names: list[str], zip_path: Path) -> None:
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for n in names:
-            p = OUT_DIR / n
-            if p.is_file():
-                zf.write(p, n)
+    staging = zip_path.with_suffix(".working")
+    try:
+        with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in names:
+                archive.write(OUT_DIR / name, name)
+        os.replace(staging, zip_path)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _reset_progress(job, summary):
+    for key in ("pages_done", "failed_pages", "review_pages"):
+        job[key] -= summary.get(key, 0)
+        summary[key] = 0
+
+
+def _run_document(source, output, job, summary, budget, cb):
+    scratch = Path(os.environ.get("OCR_TEMP_DIR", DATA_DIR / "temp"))
+    scratch.mkdir(parents=True, exist_ok=True)
+    request = dict(budget, dpi=job["dpi"], mode=PIPELINE_MODE, pages=summary["page_count"],
+                   handwriting=job.get("handwriting_declared", False),
+                   candidate_settings=job.get("candidate_settings", {}))
+    return run_isolated(source, output, scratch, request, cb)
 
 
 def _process_job(job_id: str, pdf_paths: list[Path], dpi: int):
-    with RUN_LOCK:
-        try:
-            for idx, pdf_path in enumerate(pdf_paths, 1):
-                with LOCK:
-                    JOBS[job_id]["file_index"] = idx
-                    if idx <= len(JOBS[job_id].get("file_statuses", [])):
-                        JOBS[job_id]["file_statuses"][idx - 1]["state"] = "running"
-                stem = pdf_path.stem
-                out_dir = OUT_DIR / stem
-                cb = _make_cb(job_id, JOBS[job_id]["documents"][pdf_path.name], idx)
-                try:
-                    result = process_pdf(pdf_path, out_dir, dpi=dpi,
-                                         force_tesseract=os.environ.get("OCR_TESSERACT_ONLY") == "1",
-                                         progress_cb=cb, mode=PIPELINE_MODE,
-                                         candidate_options=_candidate_options(JOBS[job_id].get("candidate_settings", {})),
-                                         handwriting=JOBS[job_id].get("handwriting_declared", False))
-                    candidate_revision = result.get("extraction_revision") or result.get("comparison", {}).get("extraction_revision")
-                    if candidate_revision:
-                        snapshot = out_dir / "extractions" / candidate_revision
-                        payload = result if result.get("extraction_revision") else json.loads((snapshot / "extraction.json").read_text("utf-8"))
-                        _review_store().register(JOBS[job_id]["owner_id"], payload, snapshot,
-                                                 display_name=JOBS[job_id]["documents"][pdf_path.name])
-                    if result["performance"]["failed_pages"] == result["document"]["pages"]:
-                        _finish_document(job_id, idx, "error")
-                        with LOCK:
-                            JOBS[job_id]["log"].append("از این سند متنی استخراج نشد؛ خروجی خالی به‌عنوان نتیجهٔ موفق ارائه نمی‌شود.")
-                        continue
-                    if not any(page.get("has_text", bool(page.get("text", "").strip()) or bool(page.get("tables")))
-                               for page in result.get("pages", [])):
-                        _finish_document(job_id, idx, "error")
-                        with LOCK:
-                            JOBS[job_id]["log"].append("سند فاقد متن استخراج‌شده است؛ فایل و پیش‌نمایش صفحه را بررسی کنید.")
-                        continue
-                except Exception:  # noqa: BLE001
-                    app.logger.exception("OCR document failed for job %s", job_id)
-                    _finish_document(job_id, idx, "error")
-                    with LOCK:
-                        JOBS[job_id]["log"].append("پردازش این سند انجام نشد. لطفاً قالب و محتوای فایل را بررسی نمایید.")
+    try:
+        for idx, pdf_path in enumerate(pdf_paths, 1):
+            with LOCK:
+                job = JOBS[job_id]
+                summary = job["file_statuses"][idx - 1]
+                if summary["state"] in ("done", "partial", "error"):
                     continue
-                names = _collect_outputs(out_dir, stem, extraction_revision=result.get("extraction_revision"))
+                name = job["documents"][pdf_path.name]
+                out_dir = OUT_DIR / pdf_path.stem
+                cb = _make_cb(job_id, name, idx)
+            try:
+                with _ocr_reservation(dpi) as budget:
+                    with LOCK:
+                        job["state"] = "running"
+                        job["file_index"] = idx
+                        summary["state"] = "running"
+                        if "started_processing_at" not in job:
+                            job["started_processing_at"] = time.time()
+                            job["queue_wait_seconds"] = round(job["started_processing_at"] - job["accepted_at"], 3)
+                        summary["ocr_started_at"] = time.time()
+                        _store().save(job_id, job)
+                    result = _run_document(pdf_path, out_dir, job, summary, budget, cb)
+                    with LOCK:
+                        summary["ocr_finished_at"] = time.time()
+                        if "worker_usage" in result:
+                            summary["worker_usage"] = result["worker_usage"]
+                candidate_revision = result.get("extraction_revision") or result.get("comparison", {}).get("extraction_revision")
+                if candidate_revision:
+                    snapshot = out_dir / "extractions" / candidate_revision
+                    payload = (result if result.get("extraction_revision") else
+                               json.loads((snapshot / "extraction.json").read_text("utf-8")))
+                    _review_store().register(job["owner_id"], payload, snapshot, display_name=name)
+                if not any(page.get("has_text", bool(page.get("text", "").strip()) or bool(page.get("tables")))
+                           for page in result.get("pages", [])):
+                    raise RuntimeError("No text extracted from document")
+                names = _collect_outputs(out_dir, pdf_path.stem, extraction_revision=result.get("extraction_revision"),
+                                         pages=result.get("pages"))
+                if any(not (OUT_DIR / path).is_file() for path in names):
+                    raise RuntimeError("Incomplete document exports")
                 _finish_document(job_id, idx, "done", names)
                 with LOCK:
-                    JOBS[job_id]["files"].extend(names)
-
-            with LOCK:
-                names = list(JOBS[job_id]["files"])
-            if names:
-                zip_path = OUT_DIR / f"{job_id}_ocr_results.zip"
-                _zip_outputs(names, zip_path)
+                    job["files"].extend(names)
+                    _store().save(job_id, job)
+            except Exception as error:
+                app.logger.exception("OCR document failed for job %s", job_id)
                 with LOCK:
-                    JOBS[job_id]["zip"] = zip_path.name
-            with LOCK:
-                JOBS[job_id]["state"] = "done" if names else "error"
-                JOBS[job_id]["finished_monotonic"] = time.monotonic()
-        except Exception:  # noqa: BLE001
-            app.logger.exception("OCR job failed: %s", job_id)
-            with LOCK:
-                unfinished = [item["index"] for item in JOBS[job_id].get("file_statuses", [])
-                              if item["state"] in ("waiting", "running")]
-            for document_index in unfinished:
-                _finish_document(job_id, document_index, "error")
-            with LOCK:
-                JOBS[job_id]["state"] = "error"
-                JOBS[job_id]["finished_monotonic"] = time.monotonic()
-                JOBS[job_id]["log"].append("پردازش اسناد با خطا مواجه شد. لطفاً دوباره تلاش کنید.")
+                    summary["error"] = (str(error) if str(error) in {"ram_budget_exhausted", "worker_timeout"}
+                                        else "document_ocr_failed")
+                    summary["ocr_finished_at"] = time.time()
+                    job["log"].append(f"پردازش سند {name} انجام نشد.")
+                _finish_document(job_id, idx, "error")
+
+        with LOCK:
+            # A restart between committing an individual file and committing the
+            # batch still discovers the file outputs in deterministic order.
+            names = [path for summary in job["file_statuses"] for path in summary["outputs"]]
+        if names:
+            zip_path = OUT_DIR / f"{job_id}_ocr_results.zip"
+            _zip_outputs(names, zip_path)
+        with LOCK:
+            job["files"] = names
+            if names:
+                job["zip"] = zip_path.name
+            complete = all(summary["state"] == "done" for summary in job["file_statuses"])
+            job["state"] = "done" if complete else "partial" if names else "error"
+            job["finished_at"] = time.time()
+            _store().save(job_id, job)
+    except Exception:
+        app.logger.exception("OCR job failed: %s", job_id)
+        with LOCK:
+            for item in JOBS[job_id]["file_statuses"]:
+                if item["state"] in ("waiting", "running"):
+                    item["state"] = "error"
+            JOBS[job_id]["state"] = "error"
+            JOBS[job_id]["finished_at"] = time.time()
+            _store().save(job_id, JOBS[job_id])
 
 
 def _run_job(job_id: str, pdf_paths: list[Path], dpi: int):
     try:
         _process_job(job_id, pdf_paths, dpi)
     finally:
-        QUEUE_SLOTS.release()
+        with LOCK:
+            JOBS.pop(job_id, None)
+            QUEUE_SLOTS.release()
+
+
+def recover_jobs():
+    """Resume only the unfinished documents of persisted jobs on cold start."""
+    _store().expire()
+    for job_id, job in _store().pending():
+        with LOCK:
+            if job_id in JOBS:
+                continue
+            if not QUEUE_SLOTS.acquire(blocking=False):
+                raise RuntimeError("Persisted jobs exceed the configured admission capacity")
+            for summary in job["file_statuses"]:
+                if summary["state"] == "running":
+                    _reset_progress(job, summary)
+                    summary["state"] = "waiting"
+            job["state"] = "queued"
+            job["log"].append("پردازش از آخرین صفحهٔ ذخیره‌شده ادامه می‌یابد.")
+            JOBS[job_id] = job
+            _store().save(job_id, job)
+        paths = [UPLOAD_DIR / name for name in job["documents"]]
+        threading.Thread(target=_run_job, args=(job_id, paths, job["dpi"]),
+                         name="ocr-job-" + job_id, daemon=False).start()
+
 
 
 def _candidate_options(settings):
@@ -329,6 +443,10 @@ def index():
     session.permanent = True
     return render_template("dashboard.html", csrf_token=session["csrf_token"],
                            dpi_levels=DPI_LEVELS, default_dpi=DEFAULT_DPI,
+                           default_dpi_fa=display_text(str(DEFAULT_DPI)),
+                           dpi_level_fa=display_text(str(DPI_LEVELS.index(DEFAULT_DPI) + 1)),
+                           dpi_count_fa=display_text(str(len(DPI_LEVELS))),
+                           dpi_options_fa=display_text("، ".join(map(str, DPI_LEVELS))),
                            csp_nonce=g.csp_nonce, pipeline_mode=PIPELINE_MODE)
 
 
@@ -336,10 +454,18 @@ def index():
 def health():
     ready = LOCAL_ENGINE.available()
     with LOCK:
-        active_jobs = sum(job["state"] == "running" for job in JOBS.values())
+        active_jobs = sum(job["state"] in ACTIVE_STATES for job in JOBS.values())
+        queued = sum(job["state"] == "queued" for job in JOBS.values())
+    fingerprint = None
+    if ready and LOCAL_ENGINE.native_ok():
+        try:
+            fingerprint = digest(current_runtime(LOCAL_ENGINE))
+        except (OSError, ValueError, IndexError):
+            app.logger.warning("Could not resolve the native OCR fingerprint")
     return jsonify(status="ok" if ready else "unavailable", engine="tesseract" if ready else None,
                    release=os.environ.get("OCR_RELEASE", "development"),
-                   active_jobs=active_jobs), 200 if ready else 503
+                   active_jobs=active_jobs, pipeline_mode=PIPELINE_MODE,
+                   queued_jobs=queued, active_ocr=OCR_ACTIVE, runtime_fingerprint=fingerprint), 200 if ready else 503
 
 
 @app.post("/upload")
@@ -350,10 +476,9 @@ def upload():
     if not _upload_rate_allowed():
         return jsonify(error="تعداد درخواست‌ها بیش از حد مجاز است. لطفاً بعداً تلاش کنید."), 429
     with LOCK:
-        if owner in PENDING_OWNERS or any(job["owner_id"] == owner and job["state"] == "running" for job in JOBS.values()):
+        if owner in PENDING_OWNERS or any(
+                job["owner_id"] == owner and job["state"] in ACTIVE_STATES for job in JOBS.values()):
             return jsonify(error="درخواست قبلی شما هنوز در حال پردازش است."), 409
-        if len(JOBS) >= 1024:
-            return jsonify(error="ظرفیت سرویس تکمیل است. لطفاً با پشتیبانی تماس بگیرید."), 503
         PENDING_OWNERS.add(owner)
     if not QUEUE_SLOTS.acquire(blocking=False):
         with LOCK:
@@ -370,13 +495,15 @@ def upload():
             return jsonify(error="در هر نوبت از یک تا ۱۰۰ فایل PDF انتخاب نمایید."), 400
         image_signatures = {".png": (b"\x89PNG\r\n\x1a\n",), ".jpg": (b"\xff\xd8\xff",), ".jpeg": (b"\xff\xd8\xff",),
                             ".tif": (b"II*\x00", b"MM\x00*"), ".tiff": (b"II*\x00", b"MM\x00*"), ".bmp": (b"BM",)}
+        valid_headers = []
         for file in fs:
             suffix = Path(file.filename or "").suffix.lower()
             signature = file.stream.read(8)
             valid_pdf = suffix == ".pdf" and signature.startswith(b"%PDF-")
             valid_image = PIPELINE_MODE == "candidate" and suffix in image_signatures and signature.startswith(image_signatures[suffix])
-            if not valid_pdf and not valid_image:
+            if suffix != ".pdf" and not (PIPELINE_MODE == "candidate" and suffix in image_signatures):
                 return jsonify(error="فایل PDF یا تصویر معتبر انتخاب کنید." if PIPELINE_MODE == "candidate" else "فقط فایل PDF معتبر قابل پردازش است."), 400
+            valid_headers.append(valid_pdf or valid_image)
             file.stream.seek(0)
         handwriting_values = request.form.getlist("handwriting")
         if len(handwriting_values) > 1 or (handwriting_values and handwriting_values[0] not in ("0", "1")):
@@ -394,18 +521,21 @@ def upload():
                                   "handwriting": request.form.get("handwriting", "0") == "1"}
         values = request.form.getlist("dpi")
         if len(values) > 1 or (values and values[0] not in {str(value) for value in DPI_LEVELS}):
-            return jsonify(error="وضوح پردازش باید یکی از مقادیر ۱۰۰، ۲۵۰، ۵۰۰، ۱۰۰۰، ۱۵۰۰ یا ۲۰۰۰ DPI باشد."), 400
+            return jsonify(error="وضوح پردازش باید یکی از مقدارهای ارائه‌شده در تنظیمات باشد."), 400
         dpi = int(values[0]) if values else DEFAULT_DPI
         job_id = uuid.uuid4().hex
         documents = {}
         file_statuses = []
         pages = 0
-        for index, file in enumerate(fs, 1):
+        for index, (file, header_is_valid) in enumerate(zip(fs, valid_headers), 1):
             suffix = Path(file.filename).suffix.lower()
             path = UPLOAD_DIR / f"{job_id}_{index:03d}{suffix}"
             saved.append(path)
             file.save(path)
+            page_count = 0
             try:
+                if not header_is_valid:
+                    raise ValueError("Invalid source signature")
                 if suffix != ".pdf":
                     from ocr_pipeline.precision.imaging import SourcePages
                     with SourcePages(path, _candidate_options(candidate_settings)) as document:
@@ -413,15 +543,14 @@ def upload():
                         for number in range(page_count):
                             document.document.seek(number)
                             document._check_dimensions(*document.document.size)
-                    pages += page_count
                 else:
-                    with pymupdf.open(path) as document:
+                    with PDF_IO_LOCK, pymupdf.open(path) as document:
                         if document.needs_pass or document.page_count == 0:
-                            return jsonify(error="فایل رمزگذاری‌شده یا بدون صفحه قابل پردازش نیست."), 400
+                            raise ValueError("Encrypted or empty PDF")
                         page_count = document.page_count
-                        pages += page_count
             except (OSError, RuntimeError, ValueError):
-                return jsonify(error="ساختار فایل PDF معتبر نیست."), 400
+                page_count = 0
+            pages += page_count
             if pages > MAX_BATCH_PAGES:
                 return jsonify(error="مجموع صفحات هر نوبت نباید از ۳۰۰ صفحه بیشتر باشد."), 400
             name = file.filename.replace("\\", "/").rsplit("/", 1)[-1]
@@ -430,20 +559,27 @@ def upload():
             file_statuses.append({
                 "index": index, "id": path.stem, "name": safe_name,
                 "size": path.stat().st_size, "page_count": page_count,
-                "pages_done": 0, "failed_pages": 0, "review_pages": 0, "state": "waiting", "outputs": [],
+                "pages_done": 0, "failed_pages": 0, "review_pages": 0,
+                "state": "waiting" if page_count else "error", "outputs": [],
+                **({} if page_count else {"error": "invalid_document"}),
             })
+        if not pages:
+            return jsonify(error="هیچ سند معتبر و قابل پردازشی یافت نشد."), 400
         with LOCK:
             PENDING_OWNERS.discard(owner)
             JOBS[job_id] = {
                 "owner_id": owner, "documents": documents, "file_statuses": file_statuses, "dpi": dpi,
-                "state": "running", "log": [], "pages_total": pages, "pages_done": 0,
+                "state": "queued", "log": [], "pages_total": pages, "pages_done": 0,
                 "failed_pages": 0, "review_pages": 0, "files": [], "zip": None, "file_index": 0,
                 "file_count": len(saved), "started": datetime.now().isoformat(timespec="seconds"),
                 "candidate_settings": candidate_settings,
                 "handwriting_declared": handwriting,
-                "started_monotonic": time.monotonic(),
+                "accepted_at": time.time(),
             }
-        threading.Thread(target=_run_job, args=(job_id, saved, dpi), daemon=True).start()
+            _store().expire()
+            _store().save(job_id, JOBS[job_id])
+        threading.Thread(target=_run_job, args=(job_id, saved, dpi),
+                         name="ocr-job-" + job_id, daemon=False).start()
         started = True
         return jsonify(job_id=job_id, count=len(saved), dpi=dpi)
     finally:
@@ -451,8 +587,8 @@ def upload():
             QUEUE_SLOTS.release()
             with LOCK:
                 PENDING_OWNERS.discard(owner)
-                if job_id:
-                    JOBS.pop(job_id, None)
+                if job_id and JOBS.pop(job_id, None):
+                    _store().forget(job_id)
             for path in saved:
                 path.unlink(missing_ok=True)
 
@@ -460,24 +596,34 @@ def upload():
 @app.get("/status/<job_id>")
 def status(job_id: str):
     with LOCK:
-        job = JOBS.get(job_id)
-        if not job or job["owner_id"] != session.get("owner_id"):
+        job = _owned_job(job_id, session.get("owner_id"))
+        if not job:
             return jsonify({"state": "unknown"}), 404
-        elapsed = max(0, int(job.get("finished_monotonic", time.monotonic())
-                             - job.get("started_monotonic", time.monotonic())))
+        elapsed = max(0, int(job.get("finished_at", time.time()) - job.get("accepted_at", time.time())))
         payload = {key: value for key, value in job.items()
-                   if key not in ("owner_id", "documents", "started_monotonic", "finished_monotonic")}
+                   if key not in ("owner_id", "documents")}
         payload["log"] = job["log"][-60:]
         payload["file_statuses"] = [dict(item) for item in job.get("file_statuses", [])]
-        return jsonify(payload | {"elapsed_seconds": elapsed})
+        return jsonify(payload | {"elapsed_seconds": elapsed,
+                                  "phase": "failed" if job["state"] == "error" else job["state"]})
+
+
+@app.get("/jobs")
+def recent_jobs():
+    return jsonify(jobs=[
+        {"job_id": job_id, "state": job["state"], "started": job["started"],
+         "file_count": job["file_count"],
+         "name": job["file_statuses"][0]["name"]}
+        for job_id, job in _store().latest(session.get("owner_id"))
+    ])
 
 
 def _owned_document(job_id: str, document_index: int, page_number: int):
     if not (1 <= document_index <= 100 and 1 <= page_number <= MAX_BATCH_PAGES):
         return None
     with LOCK:
-        job = JOBS.get(job_id)
-        if not job or job["owner_id"] != session.get("owner_id"):
+        job = _owned_job(job_id, session.get("owner_id"))
+        if not job:
             return None
         summaries = job.get("file_statuses", [])
         if document_index > len(summaries):
@@ -514,7 +660,7 @@ def preview_page(job_id: str, document_index: int, page_number: int):
                 if not success:
                     raise OSError("Preview encoding failed")
             return send_file(io.BytesIO(encoded.tobytes()), mimetype="image/png")
-        with pymupdf.open(source) as document:
+        with PDF_IO_LOCK, pymupdf.open(source) as document:
             page = document[page_number - 1]
             bounds = page.rect
             if bounds.width <= 0 or bounds.height <= 0:
@@ -547,7 +693,7 @@ def preview_text(job_id: str, document_index: int, page_number: int):
         return jsonify(state="pending", text="")
     document_id = summary["id"]
     with LOCK:
-        handwriting = JOBS.get(job_id, {}).get("handwriting_declared", False)
+        handwriting = (_owned_job(job_id, session.get("owner_id")) or {}).get("handwriting_declared", False)
     quality, annotations = _preview_quality(document_id, page_number, handwriting=handwriting)
     source = (OUT_DIR / document_id / f"{document_id}.txt").resolve()
     if OUT_DIR.resolve() not in source.parents or not source.is_file():
@@ -610,6 +756,9 @@ def _preview_quality(document_id: str, page_number: int, *, handwriting=False):
                                                bool(payload.get("document", {}).get("handwriting_declared")))
                     if not isinstance(quality, dict) or quality.get("human_verified") is not False:
                         continue
+                    partial = OUT_DIR / document_id / ".review" / f"{page_number:04d}.json"
+                    if partial.is_file() and partial.stat().st_size <= 64 * 1024:
+                        quality = quality | {"review_items": json.loads(partial.read_text("utf-8"))}
                     annotations = [item for item in page.get("export_annotations", [])
                                    if isinstance(item, dict) and item.get("kind") == "quality_notice"
                                    and isinstance(item.get("text"), str) and len(item["text"]) <= 200]
@@ -624,9 +773,8 @@ def _preview_quality(document_id: str, page_number: int, *, handwriting=False):
 @app.get("/download/<job_id>/<path:name>")
 def download(job_id: str, name: str):
     with LOCK:
-        job = JOBS.get(job_id)
-        if (not job or job["owner_id"] != session.get("owner_id") or
-                (name not in job["files"] and name != job["zip"])):
+        job = _owned_job(job_id, session.get("owner_id"))
+        if not job or (name not in job["files"] and name != job["zip"]):
             return "یافت نشد", 404
     p = (OUT_DIR / name).resolve()
     if not p.is_file() or OUT_DIR.resolve() not in p.parents:
@@ -698,5 +846,6 @@ def review_search_snapshot(document_id):
 
 
 if __name__ == "__main__":
+    recover_jobs()
     print("رابط وب: http://127.0.0.1:5001")
     app.run(host="127.0.0.1", port=5001, debug=False, threaded=True)

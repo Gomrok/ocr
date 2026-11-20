@@ -65,7 +65,7 @@ class WebTests(unittest.TestCase):
         with self.client.get("/static/fonts/Vazir-Bold.woff2") as font:
             self.assertEqual(font.data[:4], b"wOF2")
 
-    def test_brand_palette_and_six_step_resolution_control(self):
+    def test_brand_palette_and_resolution_control(self):
         self.assertIn("فضای کار استخراج متن", self.page.text)
         with self.client.get("/static/dashboard.css") as stylesheet:
             self.assertEqual(stylesheet.status_code, 200)
@@ -73,10 +73,10 @@ class WebTests(unittest.TestCase):
             self.assertIn("--teal:#078d86", stylesheet.text)
             self.assertIn("--blue:#3675db", stylesheet.text)
             self.assertIn("@media(max-width:760px)", stylesheet.text)
-        self.assertRegex(self.page.text, r'id="dpiControl" type="range" min="0" max="5" step="1" value="5"')
+        self.assertRegex(self.page.text, r'id="dpiControl" type="range" min="0" max="7" step="1" value="7"')
         self.assertIn('aria-describedby="qualityHint qualityScale"', self.page.text)
         stops = re.findall(r'<span data-dpi="(\d+)">', self.page.text)
-        self.assertEqual(stops, ["100", "250", "500", "1000", "1500", "2000"])
+        self.assertEqual(stops, ["100", "250", "300", "400", "500", "1000", "1500", "2000"])
         self.assertLess(self.page.text.index('id="qualityHeading"'), self.page.text.index('id="results"'))
 
     def test_csp_and_secure_headers(self):
@@ -161,13 +161,13 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="candidateHandwriting"', self.page.text)
         job = self.upload(handwriting="1").json["job_id"]
         self.assertTrue(web.JOBS[job]["handwriting_declared"])
-        with patch.object(web, "process_pdf", return_value={
+        with patch.object(web, "run_isolated", return_value={
                 "document": {"pages": 1}, "performance": {"failed_pages": 0},
                 "pages": [{"text": "synthetic", "has_text": True}]} ) as process, \
                 patch.object(web, "_collect_outputs", return_value=[]):
             web._process_job(job, [self.uploads/f"{job}_001.pdf"], 2000)
-        self.assertTrue(process.call_args.kwargs["handwriting"])
-        self.assertEqual(process.call_args.kwargs["mode"], "legacy")
+        self.assertTrue(process.call_args.args[3]["handwriting"])
+        self.assertEqual(process.call_args.args[3]["mode"], "legacy")
 
     def test_invalid_or_duplicate_handwriting_flags_are_rejected_before_saving(self):
         for values in (["yes"], ["false"], ["1", "0"]):
@@ -266,8 +266,8 @@ class WebTests(unittest.TestCase):
         self.assertEqual(list(self.uploads.iterdir()), [])
         self.assertEqual(web.PENDING_OWNERS, set())
 
-    def test_all_six_dpi_levels_reach_the_worker_and_status(self):
-        for dpi in (100, 250, 500, 1000, 1500, 2000):
+    def test_all_dpi_levels_reach_the_worker_and_status(self):
+        for dpi in (100, 250, 300, 400, 500, 1000, 1500, 2000):
             with self.subTest(dpi=dpi):
                 response = self.upload(dpi=str(dpi))
                 self.assertEqual(response.status_code, 200)
@@ -286,7 +286,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(web.threading.Thread.call_args.kwargs["args"][2], 2000)
 
     def test_invalid_and_duplicate_dpi_values_are_rejected_without_files(self):
-        for dpi in ("999999", "-1", "invalid", "0", "200", "300", "2000.0", "1e3", "",
+        for dpi in ("999999", "-1", "invalid", "0", "200", "301", "2000.0", "1e3", "",
                     " 100", "۱۰۰", "0100", "NaN", ["100", "2000"], ["500", "500"]):
             with self.subTest(dpi=dpi):
                 web.UPLOAD_TIMES.clear()
@@ -297,16 +297,17 @@ class WebTests(unittest.TestCase):
         web.threading.Thread.assert_not_called()
 
     def test_selected_dpi_is_forwarded_to_every_document_in_batch(self):
-        with patch.object(web, "process_pdf", return_value={
-                "document": {"pages": 1}, "performance": {"failed_pages": 0}}) as process:
-            response = self.upload(dpi="250")
+        with patch.object(web, "run_isolated", return_value={
+                "document": {"pages": 1}, "performance": {"failed_pages": 0},
+                "pages": [{"text": "synthetic", "has_text": True}]}) as process:
+            data = {"dpi":"250", "pdfs":[(io.BytesIO(pdf_bytes()), name) for name in ("first.pdf","second.pdf")]}
+            response = self.client.post("/upload", data=data, headers={"X-CSRF-Token": self.csrf})
             job_id = response.json["job_id"]
             paths = [self.uploads / f"{job_id}_001.pdf", self.uploads / f"{job_id}_002.pdf"]
-            web.JOBS[job_id]["documents"][paths[1].name] = "دوم.pdf"
             with patch.object(web, "_collect_outputs", return_value=[]):
                 web._process_job(job_id, paths, 250)
         self.assertEqual(process.call_count, 2)
-        self.assertTrue(all(call.kwargs["dpi"] == 250 for call in process.call_args_list))
+        self.assertTrue(all(call.args[3]["dpi"] == 250 for call in process.call_args_list))
 
     def test_100_pdf_batch_contract(self):
         content = pdf_bytes()
@@ -321,7 +322,7 @@ class WebTests(unittest.TestCase):
         path=self.uploads/f"{job}_001.pdf"
         result={"document":{"pages":1},"performance":{"failed_pages":0},
                 "pages":[{"page":1,"status":"blank","has_text":False,"text":"","tables":[]}]}
-        with patch.object(web,"process_pdf",return_value=result), patch.object(web,"_collect_outputs") as outputs:
+        with patch.object(web,"run_isolated",return_value=result), patch.object(web,"_collect_outputs") as outputs:
             web._process_job(job,[path],2000)
         outputs.assert_not_called()
         state=self.client.get(f"/status/{job}").json

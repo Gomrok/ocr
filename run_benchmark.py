@@ -1,130 +1,83 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""اجرای پایپ‌لاین روی ۴ سند آزمون + محاسبهٔ CER/WER/Numeric/Table (بخش ۲۶ و ۳۰).
-
-مصرف:
-    python run_benchmark.py            # با fallback کامل (Vision اول، Tesseract پشتیبان)
-    python run_benchmark.py --local    # فقط Tesseract
-"""
+"""Run the legacy fixture benchmark in a fresh output directory."""
 from __future__ import annotations
 
+import argparse
 import json
+import math
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
 
-BASE = Path(__file__).parent
-OUT = "output_bench"
-GT = BASE / "input" / "ground_truth.json"
+from ocr_pipeline.benchmark import numeric_accuracy, numeric_tokens, table_accuracy
+from ocr_pipeline.evaluation import micro, text_metrics
+from ocr_pipeline.storage import atomic_json
 
-DOCS = ["bench_persian", "bench_table", "bench_mixed", "bench_lowq"]
-
-
-def run_pipeline(tesseract_only: bool) -> None:
-    argv = [str(BASE / "input" / f"{d}.pdf") for d in DOCS]
-    argv += ["--out", OUT, "--benchmark", str(GT)]
-    if tesseract_only:
-        argv.append("--tesseract-only")
-    proc = subprocess.run(
-        [str(BASE / ".venv" / "bin" / "python"), str(BASE / "ocr_bot.py"), *argv],
-        cwd=BASE)
-    if proc.returncode != 0:
-        sys.exit(proc.returncode)
+BASE = Path(__file__).resolve().parent
+DOCS = ("bench_persian", "bench_table", "bench_mixed", "bench_lowq")
 
 
-def report() -> None:
-    from ocr_pipeline.benchmark import cer, numeric_accuracy, table_accuracy, wer
+def report(output, truth):
+    results = {}
+    for stem in DOCS:
+        reference = truth[stem]
+        if not reference.get("text", "").strip():
+            raise ValueError(f"{stem}: empty text reference")
+        directory = output / stem
+        result = json.loads((directory / (stem + ".json")).read_text("utf-8"))
+        pages, perf = result["pages"], result["performance"]
+        if not pages or perf.get("failed_pages") != 0 or not (perf.get("ocr_native_calls", 0) + perf.get("ocr_processes", 0)):
+            raise ValueError(f"{stem}: no complete OCR execution")
+        text = "\n".join(page.get("text", "") for page in pages)
+        row = {**text_metrics(reference["text"], text), "performance": perf}
+        if numeric_tokens(reference["text"]):
+            metric = numeric_accuracy(reference["text"], text)
+            if not math.isfinite(metric):
+                raise ValueError(f"{stem}: numeric metric unavailable")
+            row["ordered_number_diagnostic"] = metric
+        if reference.get("table_rows"):
+            from ocr_pipeline.tables import rows_of
+            files = sorted((directory / "tables").glob("page_*_table_001.json"))
+            if not files:
+                raise ValueError(f"{stem}: expected table is missing")
+            cells = rows_of(json.loads(files[0].read_text("utf-8")))
+            row["table"] = table_accuracy(reference["table_rows"], cells)
+        results[stem] = row
+    if not any("ordered_number_diagnostic" in row for row in results.values()):
+        raise ValueError("No expected numbers in the fixture benchmark")
+    return {"status": "MEASURED_DIAGNOSTIC", "release_status": "NOT_EVALUATED",
+            "CER": micro([doc["CER"] for doc in results.values()]),
+            "WER": micro([doc["WER"] for doc in results.values()]),
+            "documents": results}
 
-    gt = json.loads(GT.read_text("utf-8"))
-    agg = {"cer": [], "wer": [], "num": [], "cell": [], "row": [], "struct": []}
-    print("\n" + "=" * 62)
-    print("📊 بنچمارک دقت (بخش ۲۶) — CER روی متن JSON (بدون جداساز/جدول)")
-    print("=" * 62)
-    for doc in DOCS:
-        base = Path(OUT) / doc
-        # CER روی متن JSON (بازسازی کلمه‌محور) — نه TXT که جداکنندهٔ صفحه و
-        # جدول Markdown دارد و CER را غیرواقعی باد می‌دهد
-        jf = base / f"{doc}.json"
-        if not jf.is_file():
-            print(f"  {doc}: خروجی یافت نشد!")
-            continue
-        d = json.loads(jf.read_text("utf-8"))
-        hyp = "\n".join(p.get("text", "") for p in d.get("pages", []))
-        ref = gt[doc]["text"]
-        c, w, n = cer(ref, hyp), wer(ref, hyp), numeric_accuracy(ref, hyp)
-        agg["cer"].append(c)
-        agg["wer"].append(w)
-        agg["num"].append(n)
-        line = f"  {doc:14s} CER={c:.3f}  WER={w:.3f}  Numeric={n:.3f}"
-        if gt[doc].get("table_rows"):
-            tj = base / "tables" / "table_001.json"
-            if tj.is_file():
-                from ocr_pipeline.tables import rows_of
-                got = rows_of(json.loads(tj.read_text("utf-8")))
-                ta = table_accuracy(gt[doc]["table_rows"], got)
-                agg["cell"].append(ta["cell_accuracy"])
-                agg["row"].append(ta["row_accuracy"])
-                agg["struct"].append(ta["structure_accuracy"])
-                line += (f"  Cell={ta['cell_accuracy']:.2f}"
-                         f" Row={ta['row_accuracy']:.2f}"
-                         f" Struct={ta['structure_accuracy']:.2f}")
-            else:
-                line += "  [جدولی استخراج نشد]"
-        print(line)
 
-    # متریکس عملکرد (بخش ۲۵)
-    peak_ram, avg_t, failed, low_conf, engines = 0.0, 0.0, 0, 0, set()
-    for doc in DOCS:
-        jf = Path(OUT) / doc / f"{doc}.json"
-        if not jf.is_file():
-            continue
-        d = json.loads(jf.read_text("utf-8"))
-        perf = d.get("performance", {})
-        peak_ram = max(peak_ram, perf.get("peak_rss_mb", 0))
-        avg_t += perf.get("avg_page_seconds", 0)
-        failed += perf.get("failed_pages", 0)
-        low_conf += perf.get("low_confidence_regions", 0)
-        for p in d.get("pages", []):
-            engines.update(p.get("engines") or [])
-    n_docs = len(DOCS)
-
-    def mean(xs):
-        return round(sum(xs) / len(xs), 3) if xs else None
-
-    print("\n" + "=" * 62)
-    print("📋 FINAL REPORT")
-    print("=" * 62)
-    master_ok = all(
-        (Path(OUT) / d / f"{d}.json").is_file()
-        and json.loads((Path(OUT) / d / f"{d}.json").read_text("utf-8"))
-        .get("pages", [{}])[0].get("effective_dpi") == 2000
-        for d in DOCS
-        if (Path(OUT) / d / f"{d}.json").is_file())
-    print(f"""OCR_PIPELINE_STATUS: {"OPERATIONAL" if not failed else "PARTIAL"}
-MASTER_RENDER_DPI: 2000
-MASTER_RENDER_VERIFIED: {"YES" if master_ok else "NO"}
-PERSIAN_TEXT_STATUS: VERIFIED (bench_persian + bench_lowq)
-PERSIAN_DIGITS_STATUS: VERIFIED (numeric_accuracy={mean(agg['num'])})
-ENGLISH_DIGITS_STATUS: VERIFIED (bench_mixed identifiers)
-MIXED_RTL_LTR_STATUS: VERIFIED (bench_mixed)
-TABLE_DETECTION_STATUS: VERIFIED (bench_table grid)
-TABLE_RECONSTRUCTION_STATUS: cell={mean(agg['cell'])} row={mean(agg['row'])} struct={mean(agg['struct'])}
-GOOGLE_VISION_STATUS: {"USED" if "google_vision" in engines else "BLOCKED_ON_THIS_NETWORK(403) — fallback active"}
-TESSERACT_STATUS: {"VERIFIED" if "tesseract" in engines else "NOT_USED"} (fas/best, docker)
-LATIN_SECOND_PASS: {"ACTIVE" if any("eng_pass" in e for e in engines) else "inactive"}
-FALLBACK_STATUS: {"ACTIVE" if "tesseract" in engines and "google_vision" not in engines else "idle/active"}
-CER: {mean(agg['cer'])}
-WER: {mean(agg['wer'])}
-NUMERIC_ACCURACY: {mean(agg['num'])}
-TABLE_CELL_ACCURACY: {mean(agg['cell'])}
-PEAK_RAM: {round(peak_ram)}MB
-AVG_PAGE_TIME: {round(avg_t / n_docs, 1)}s
-FAILED_PAGES: {failed}
-LOW_CONFIDENCE_REGIONS: {low_conf}
-OUTPUT_DIRECTORY: {OUT}/
-FINAL_STATUS: {"VERIFIED_WITH_REAL_OCR" if not failed else "PARTIAL"}""")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local", action="store_true", help="Compatibility flag; OCR is always local")
+    parser.add_argument("--inputs", type=Path, default=BASE / "input")
+    parser.add_argument("--out", type=Path, default=BASE / "output_bench")
+    args = parser.parse_args()
+    try:
+        reference = json.loads((args.inputs / "ground_truth.json").read_text("utf-8"))
+        inputs = [args.inputs.resolve() / (stem + ".pdf") for stem in DOCS]
+        if set(reference) != set(DOCS) or not all(path.is_file() for path in inputs):
+            raise ValueError("Missing fixture documents or ground truth")
+        args.out.mkdir(parents=True, exist_ok=True)
+        output = Path(tempfile.mkdtemp(prefix="run-", dir=args.out.resolve()))
+        subprocess.run(
+            [sys.executable, "-B", str(BASE / "ocr_bot.py"), *map(str, inputs), "--out", str(output),
+             "--mode", "legacy", "--tesseract-only"],
+            check=True, cwd=BASE,
+        )
+        measured = report(output, reference)
+        atomic_json(output / "benchmark.json", measured)
+        print(json.dumps(measured, ensure_ascii=False))
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
+        print(json.dumps({"status":"FAIL","reason":str(error)}), file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    run_pipeline(tesseract_only="--local" in sys.argv)
-    report()
+    sys.exit(main())

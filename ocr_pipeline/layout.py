@@ -128,6 +128,56 @@ def detect_text_regions(img: np.ndarray, max_mp_region: float = 18.0) -> list[tu
     return regions
 
 
+def outline_mask(image: np.ndarray) -> np.ndarray | None:
+    """Find connected outlines and pen strokes that dwarf the text in a crop."""
+    factor = min(1.0, 1400.0 / max(image.shape))
+    view = cv2.resize(image, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA) if factor < 1 else image
+    if min(view.shape) < 30:
+        return None
+    threshold = cv2.threshold(view, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(threshold)
+    h, w = view.shape
+    glyphs = [height for _, _, width, height, area in stats[1:]
+              if 6 <= height < .24 * h and width >= 3 and area >= 18]
+    if len(glyphs) < 3:
+        return None
+    typical_height = float(np.median(glyphs))
+    ink = int(np.count_nonzero(threshold))
+    outlines = [index for index in range(1, count)
+                if stats[index, 2] >= .35 * w
+                and stats[index, 3] >= max(.34 * h, 5 * typical_height)
+                and .10 * ink <= stats[index, 4] <= .14 * stats[index, 2] * stats[index, 3]]
+    if not outlines:
+        return None
+    # Mask the stroke pixels. The inside of a border may contain an entire
+    # advertisement, and text contained in a bounding rectangle stays visible.
+    mask = np.isin(labels, outlines).astype(np.uint8)
+    return cv2.dilate(mask, np.ones((3, 3), np.uint8))
+
+
+def outline_angle(mask: np.ndarray) -> float:
+    """Use parallel rules, such as the edges of a framed notice, as local baselines."""
+    width = mask.shape[1]
+    lines = cv2.HoughLinesP(mask, 1, np.pi / 360, max(40, width // 6),
+                            minLineLength=max(60, width // 3), maxLineGap=12)
+    if lines is None:
+        return 0.0
+    horizontal = []
+    for x0, y0, x1, y1 in lines[:, 0]:
+        dx, dy = int(x1) - int(x0), int(y1) - int(y0)
+        if not dx or abs(dy / dx) > .106:
+            continue
+        angle = float(np.degrees(np.arctan(dy / dx)))
+        horizontal.append((angle, (int(y1) + int(y0)) / 2))
+    if not horizontal:
+        return 0.0
+    typical = float(np.median([a for a, _ in horizontal]))
+    aligned = [y for a, y in horizontal if abs(a - typical) < .7]
+    if len(aligned) >= 2 and max(aligned) - min(aligned) >= mask.shape[0] / 3 and abs(typical) >= .4:
+        return round(typical, 2)
+    return 0.0
+
+
 def split_into_tiles(bbox: tuple, max_mp: float, overlap_pct: float = 0.10) -> list[tuple]:
     """تایلینگ مستطیل با هم‌پوشانی ۱۰٪ (بخش ۱۳)."""
     x0, y0, x1, y1 = bbox

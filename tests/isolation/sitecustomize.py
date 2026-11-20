@@ -29,8 +29,10 @@ def install_guard():
             require_owned(args[0])
         elif event in ("os.rename", "os.link", "os.symlink"):
             require_owned(args[0]); require_owned(args[1])
-        elif event.startswith("sqlite3.connect"):
-            raise PermissionError("OCR tests must not connect to a database")
+        elif event == "sqlite3.connect":
+            # Job metadata is a local SQLite file. SQLite allocates its own
+            # journals, so check the database path before it can open either.
+            require_owned(args[0])
     sys.addaudithook(audit)
     _installed = True
 

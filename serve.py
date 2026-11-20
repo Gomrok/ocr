@@ -72,10 +72,16 @@ def main() -> None:
         "GOOGLE_API_KEY",
         "OMP_THREAD_LIMIT",
         "OCR_PERSISTENT_ENGINE",
+        "OCR_PIPELINE_MODE",
+        "OCR_WORKERS",
+        "OCR_RAM_BUDGET_MIB",
+        "OCR_DEFAULT_DPI",
     }
     for key, value in settings.items():
         if key in allowed:
             os.environ[key] = str(value)
+    from ocr_pipeline.release_identity import profile
+    os.environ.update(profile(settings))
     if len(os.environ.get("OCR_SECRET_KEY", "")) < 32:
         raise RuntimeError("A persistent production session key is required")
     log_dir = configure_storage(settings, args.settings)
@@ -94,8 +100,9 @@ def main() -> None:
     )
     from waitress import serve
 
-    from web_app import app
+    from web_app import app, recover_jobs
 
+    recover_jobs()
     serve(
         app,
         host="127.0.0.1",

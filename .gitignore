@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 output/
+output_bench/
 api_key.txt
 *.pyc
 .DS_Store

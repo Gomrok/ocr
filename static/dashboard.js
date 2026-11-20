@@ -9,6 +9,7 @@
   const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
   const files = [];
   let activeJob = null;
+  let displayedJob = null;
   let latestStatus = null;
   let pollingTimer = null;
   let selectedDocument = 1;
@@ -34,9 +35,10 @@
     }
   }
   function stateLabel(state) {
-    return {selected: 'انتخاب‌شده', waiting: 'در انتظار', running: 'در حال پردازش',
+    return {selected: 'انتخاب‌شده', waiting: 'در انتظار', queued: 'در صف', running: 'در حال پردازش',
       done: 'آماده', partial: 'بخشی با خطا', error: 'ناموفق'}[state] || 'نامشخص';
   }
+  function inProgress(state) { return state === 'queued' || state === 'running'; }
   function fileSize(bytes) {
     if (bytes < 1048576) return `${number(Math.max(1, Math.ceil(bytes / 1024)))} کیلوبایت`;
     return `${number(Math.round(bytes / 104857.6) / 10)} مگابایت`;
@@ -78,18 +80,21 @@
   }
   function renderSelection() {
     const submitted = Boolean(activeJob || uploadBusy);
-    const statusFiles = latestStatus && Array.isArray(latestStatus.file_statuses)
+    const statusFiles = (activeJob || !files.length) && latestStatus && Array.isArray(latestStatus.file_statuses)
       ? latestStatus.file_statuses : null;
     const list = byId('flist');
     list.replaceChildren();
-    (statusFiles || files).forEach((file, index) => list.append(fileRow(file, index, submitted)));
+    (statusFiles || files).forEach((file, index) => list.append(fileRow(file, index, submitted || Boolean(statusFiles))));
     const count = statusFiles ? statusFiles.length : files.length;
     byId('selectionCount').textContent = `${number(count)} فایل`;
     byId('navCount').textContent = number(count);
     byId('selectionEmpty').hidden = count !== 0;
-    byId('clearFiles').hidden = submitted || count === 0;
-    byId('go').disabled = submitted || count === 0;
-    byId('goLabel').textContent = uploadBusy ? 'در حال بارگذاری' : activeJob ? 'پردازش آغاز شد' : 'شروع پردازش';
+    byId('clearFiles').hidden = submitted || !files.length;
+    byId('go').disabled = submitted || !files.length;
+    for (const id of ['dpiControl', 'candidateHandwriting', 'candidateProfile', 'candidateDpi', 'jobHistory']) {
+      if (byId(id)) byId(id).disabled = submitted;
+    }
+    byId('goLabel').textContent = uploadBusy ? 'در حال بارگذاری' : activeJob ? 'درخواست ثبت شد' : 'شروع پردازش';
     byId('drop').setAttribute('aria-disabled', String(submitted));
   }
   function addFiles(incoming) {
@@ -169,9 +174,9 @@
       const response = await fetch('/upload', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}, body: data, credentials: 'same-origin'});
       const body = await readJson(response);
       if (!response.ok || !body.job_id) throw new Error(body.error || 'بارگذاری انجام نشد. دوباره تلاش کنید.');
-      activeJob = body.job_id;
-      byId('dpiControl').disabled = true;
-      byId('candidateHandwriting').disabled = true;
+      displayedJob = activeJob = body.job_id;
+      latestStatus = null;
+      resetPreview();
       byId('runDpi').textContent = `${number(candidateMode ? Number(byId('candidateDpi').value) : body.dpi)} DPI`;
       await fetchStatus();
     } catch (error) {
@@ -213,7 +218,7 @@
     return `${format} · ${parts.at(-1)}`;
   }
   function downloadHref(path) {
-    return `/download/${encodeURIComponent(activeJob)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+    return `/download/${encodeURIComponent(displayedJob)}/${path.split('/').map(encodeURIComponent).join('/')}`;
   }
   function renderDownloads(status) {
     const names = Array.isArray(status.files) ? status.files : [];
@@ -276,14 +281,17 @@
     byId('pageCount').textContent = `${number(done)} از ${number(total)} صفحه بررسی شد`;
     byId('documentCount').textContent = `${number(status.file_count || 0)} سند`;
     byId('elapsedTime').textContent = formatElapsed(status.elapsed_seconds);
-    const complete = status.state === 'done' || status.state === 'error';
-    const title = status.state === 'done' ? 'پردازش پایان یافت' : status.state === 'error' ? 'پردازش انجام نشد' : 'در حال استخراج متن';
+    const complete = !inProgress(status.state);
+    const title = {done: 'پردازش پایان یافت', error: 'پردازش انجام نشد',
+      partial: 'بخشی از پردازش با خطا پایان یافت', queued: 'در صف پردازش', running: 'در حال استخراج متن'}[status.state];
     byId('runTitleText').textContent = title;
-    byId('tag').textContent = status.state === 'done'
+    byId('runDpi').textContent = `${number(candidateMode ? status.candidate_settings?.candidate_dpi || 300 : status.dpi)} DPI`;
+    byId('tag').textContent = status.state === 'done' || status.state === 'partial'
       ? status.review_pages > 0 ? 'پیش‌نویس نیازمند بازبینی' : 'خروجی خودکار، تأییدنشده'
-      : status.state === 'error' ? 'نیازمند بررسی' : 'در حال پردازش';
+      : status.state === 'error' ? 'نیازمند بررسی' : stateLabel(status.state);
     byId('info').textContent = complete
       ? `${number(status.failed_pages || 0)} صفحه با خطا، ${number(status.review_pages || 0)} صفحه با هشدار بازبینی`
+      : status.state === 'queued' ? 'پس از آزادشدن ظرفیت، پردازش آغاز می‌شود.'
       : `سند ${number(status.file_index || 0)} از ${number(status.file_count || 0)} در حال بررسی است`;
     renderLog(Array.isArray(status.log) ? status.log : []);
     renderSelection();
@@ -291,19 +299,28 @@
     if (complete) setSteps(3);
   }
   async function fetchStatus() {
-    if (!activeJob) return;
+    const job = displayedJob;
+    if (!job) return;
     try {
-      const response = await fetch(`/status/${encodeURIComponent(activeJob)}`, {credentials: 'same-origin', cache: 'no-store'});
+      const response = await fetch(`/status/${encodeURIComponent(job)}`, {credentials: 'same-origin', cache: 'no-store'});
       const body = await readJson(response);
+      if (job !== displayedJob) return;
+      if (response.status === 404 && activeJob === job) {
+        activeJob = null;
+        renderSelection();
+      }
       if (!response.ok) throw new Error(body.error || 'وضعیت پردازش در دسترس نیست.');
       statusFailures = 0;
       byId('retryStatus').hidden = true;
       latestStatus = body;
+      if (inProgress(body.state)) activeJob = job;
+      else if (activeJob === job) { activeJob = null; files.length = 0; }
       renderProgress(body);
       updateDocumentSelector(body);
-      if (body.state === 'running') scheduleStatus();
-      else clearTimeout(pollingTimer);
+      if (inProgress(body.state)) scheduleStatus();
+      else { clearTimeout(pollingTimer); refreshHistory(); }
     } catch (error) {
+      if (job !== displayedJob) return;
       statusFailures += 1;
       byId('info').textContent = 'دریافت وضعیت موقتاً انجام نشد؛ پردازش سرور ممکن است ادامه داشته باشد.';
       if (statusFailures < 5) scheduleStatus(Math.min(12000, 1500 * statusFailures));
@@ -311,6 +328,42 @@
     }
   }
   byId('retryStatus').addEventListener('click', () => { statusFailures = 0; fetchStatus(); });
+
+  function resetPreview() {
+    selectedDocument = 1;
+    selectedPage = 1;
+    lastPreviewKey = '';
+    previewSequence += 1;
+  }
+
+  async function refreshHistory(restore = false) {
+    const selector = byId('jobHistory');
+    try {
+      const response = await fetch('/jobs', {credentials: 'same-origin', cache: 'no-store'});
+      if (!response.ok) return;
+      const {jobs} = await response.json();
+      selector.replaceChildren(new Option('نتایج نوبت‌های قبلی', ''));
+      for (const job of jobs) {
+        selector.add(new Option(`${job.name} · ${stateLabel(job.state)}`, job.job_id));
+      }
+      byId('jobHistoryLabel').hidden = !jobs.length;
+      if (restore && !displayedJob && !uploadBusy && jobs.length) {
+        const job = jobs.find(item => inProgress(item.state)) || jobs[0];
+        displayedJob = job.job_id;
+        if (inProgress(job.state)) activeJob = displayedJob;
+        fetchStatus();
+      }
+      selector.value = displayedJob || '';
+    } catch {
+      // A temporary history error does not interrupt an upload or polling.
+    }
+  }
+  byId('jobHistory').addEventListener('change', (event) => {
+    if (activeJob || uploadBusy || !event.target.value) return;
+    displayedJob = event.target.value;
+    resetPreview();
+    fetchStatus();
+  });
 
   function updateDocumentSelector(status) {
     const summaries = status.file_statuses || [];
@@ -330,7 +383,7 @@
     const maxPage = summaries[selectedDocument - 1].page_count;
     selectedPage = Math.max(1, Math.min(selectedPage, maxPage));
     updatePreviewControls();
-    const previewKey = `${activeJob}:${selectedDocument}:${selectedPage}:${summaries[selectedDocument - 1].state}`;
+    const previewKey = `${displayedJob}:${selectedDocument}:${selectedPage}:${summaries[selectedDocument - 1].state}`;
     if (previewKey !== lastPreviewKey) {
       lastPreviewKey = previewKey;
       renderPreview();
@@ -355,6 +408,8 @@
   function showTextEmpty(message) {
     byId('qualityNotice').hidden = true;
     byId('qualityNotice').textContent = '';
+    byId('reviewItems').replaceChildren();
+    byId('reviewItems').hidden = true;
     byId('pageText').hidden = true;
     byId('copyPageText').disabled = true;
     byId('textEmpty').textContent = message;
@@ -362,7 +417,7 @@
   }
   async function renderPreview() {
     const summary = selectedSummary();
-    if (!activeJob || !summary) return;
+    if (!displayedJob || !summary) return;
     const sequence = ++previewSequence;
     const image = byId('pageImage');
     showImageEmpty('تصویر صفحه در حال آماده‌سازی است…');
@@ -375,9 +430,9 @@
       image.alt = `تصویر صفحهٔ ${number(selectedPage)} سند ${summary.name}`;
     };
     image.onerror = () => { if (sequence === previewSequence) showImageEmpty('نمایش تصویر این صفحه انجام نشد.'); };
-    image.src = `/preview/${encodeURIComponent(activeJob)}/${summary.index}/${selectedPage}`;
+    image.src = `/preview/${encodeURIComponent(displayedJob)}/${summary.index}/${selectedPage}`;
     try {
-      const response = await fetch(`/preview-text/${encodeURIComponent(activeJob)}/${summary.index}/${selectedPage}`,
+      const response = await fetch(`/preview-text/${encodeURIComponent(displayedJob)}/${summary.index}/${selectedPage}`,
         {credentials: 'same-origin', cache: 'no-store'});
       const body = await readJson(response);
       if (sequence !== previewSequence) return;
@@ -393,6 +448,21 @@
         } else if (!quality.metadata_available) notice += ' جزئیات ابهام این خروجی در دسترس نیست.';
         byId('qualityNotice').textContent = notice;
         byId('qualityNotice').hidden = false;
+        const list = byId('reviewItems');
+        const reasons = {
+          numeric_disagreement: 'اختلاف در خوانش عدد',
+          numeric_unresolved: 'خوانش عدد نامطمئن است',
+          numeric_budget_deferred: 'عدد به بازخوانی نیاز دارد',
+          recognition_disagreement: 'خوانش‌های این ناحیه متفاوت‌اند'
+        };
+        for (const item of quality.review_items || []) {
+          const entry = document.createElement('li');
+          const value = document.createElement('bdi');
+          value.textContent = item.text;
+          entry.append(value, ' · ' + (reasons[item.reason] || 'نیازمند مقایسه با تصویر'));
+          list.append(entry);
+        }
+        list.hidden = !list.childElementCount;
         byId('pageText').textContent = body.text;
         byId('pageText').hidden = false;
         byId('textEmpty').hidden = true;
@@ -472,4 +542,5 @@
   for (const id of ['closeHelp', 'confirmHelp']) byId(id).addEventListener('click', () => help.close());
   help.addEventListener('click', (event) => { if (event.target === help) help.close(); });
   renderSelection();
+  refreshHistory(true);
 })();

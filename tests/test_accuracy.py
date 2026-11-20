@@ -267,7 +267,7 @@ class AccuracyTests(unittest.TestCase):
         cv2.rectangle(crop, (100, 100), (180, 400), 0, -1)
         metrics = Metrics()
         try:
-            with patch.object(E, 'ocr_many', return_value=[{'text': '۱'}, {'text': '۱'}]) as read:
+            with patch.object(E, 'ocr_many', return_value=[{'text': '۱', 'confidence': .9}] * 2) as read:
                 self.assertEqual(P._glyph_digit_ocr([], crop, metrics)['text'], '۱')
             for encoded, expected in zip(read.call_args.args[1], [80, 44]):
                 image = cv2.imdecode(np.frombuffer(encoded, np.uint8), 0)
@@ -283,7 +283,7 @@ class AccuracyTests(unittest.TestCase):
         cv2.circle(crop, (400, 245), 55, 0, 12)
         metrics = Metrics()
         try:
-            with patch.object(E, 'ocr_many', return_value=[{'text': '۲'}, {'text': '۲'}]):
+            with patch.object(E, 'ocr_many', return_value=[{'text': '۲', 'confidence': .9}] * 2):
                 self.assertEqual(E.en_digits_only(P._glyph_digit_ocr([], crop, metrics)['text']), '200')
         finally:
             metrics.stop()
@@ -305,7 +305,9 @@ class AccuracyTests(unittest.TestCase):
         cv2.rectangle(crop, (10, 10), (18, 25), 0, -1)
         metrics = Metrics()
         try:
-            with patch.object(E, 'ocr_many', return_value=[{'text': '۲'}, {'text': '۳'}]) as read:
+            disagree = [{'text': '۲', 'confidence': .9}, {'text': '۳', 'confidence': .9}]
+            with patch.object(E, 'ocr_many', return_value=disagree) as read, \
+                    patch.object(P.P, 'resize_by_factor', side_effect=lambda image, _: image):
                 result = P._glyph_digit_ocr([], crop, metrics, dpi=100)
             self.assertEqual(read.call_count, 1)
             self.assertTrue(result.get('needs_review'))

@@ -92,7 +92,9 @@ class MetricTests(unittest.TestCase):
         self.assertEqual((result["covered_lines"],result["duplicates"],result["order_inversions"]),(2,1,2))
 
     def test_document_split_and_human_reference_are_not_inferred(self):
-        document = {"source_sha256":"a"*64,"split":"tuning","pages":[{"regions":[{"readability":"readable","human_verified":False}]}]}
+        region = {"id": "body", "text": "متن", "bbox_relative": [0,0,1,1],
+                  "readability": "readable", "human_verified": False}
+        document = {"source_sha256":"a"*64,"split":"tuning","pages":[{"page":1,"regions":[region]}]}
         self.assertEqual(validate_reference({"documents":[document]})["reference_status"], "PROVISIONAL")
         with self.assertRaises(ValueError):
             validate_reference({"documents":[document, {**document,"split":"evaluation"}]})

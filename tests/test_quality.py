@@ -52,10 +52,9 @@ class QualityTests(unittest.TestCase):
                         "raw_text": "0046 NA ...", "words": [{"text": "۰۰۴۶", "raw_ocr_text": "0046", "confidence": .99}],
                         "tables": [], "metrics": {}, "engines": ["tesseract"], "low_confidence_words": 0}
             stats = {"ocr_processes": 0, "ocr_cache_hits": 0, "ocr_native_calls": 0}
-            engine = SimpleNamespace(name="tesseract", statistics=lambda: stats.copy())
+            engine = SimpleNamespace(name="tesseract", cache_enabled=True, statistics=lambda: stats.copy())
             events = []
             with patch.object(pipeline.E, "pick_engine", return_value=engine), \
-                    patch.object(pipeline.R, "render_master"), \
                     patch.object(pipeline, "ocr_page", return_value=copy.deepcopy(original)):
                 result = pipeline._process_document(document, engine, source, root/"exports", 300,
                                                     None, True, 0, False, events.append, handwriting=True)

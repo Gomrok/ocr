@@ -3,6 +3,8 @@ param(
     [string]$Python = 'C:\Program Files\Python311\python.exe',
     [string]$Tesseract = 'C:\Tools\GomrokOCR\Tesseract\tesseract.exe',
     [string]$StorageRoot,
+    [string]$GateBundle,
+    [string]$GatePython,
     [switch]$ReuseRuntime,
     [switch]$ProvisionDomain
 )
@@ -59,6 +61,14 @@ if (Test-Path -LiteralPath $settingsPath) {
     $previous = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
     foreach ($property in $previous.PSObject.Properties) { $settings[$property.Name] = $property.Value }
 }
+if (-not $GateBundle) { throw 'A private, passing release evidence bundle is required.' }
+if (-not $GatePython) {
+    $GatePython = if ($previousTask) { $previousTask.Actions[0].Execute.Trim('"') } else { $Python }
+}
+$preflight = & $GatePython -B (Join-Path $sourceRoot 'scripts\release_gate.py') preflight --bundle $GateBundle --settings $settingsPath --tesseract $Tesseract
+if ($LASTEXITCODE -ne 0) { throw 'Release gate rejected this revision.' }
+$gate = $preflight | ConvertFrom-Json
+if ($gate.status -ne 'READY_TO_RELEASE' -or $gate.commit -ne $revision) { throw 'Release gate identity mismatch.' }
 $previousData = if ($settings.ContainsKey('OCR_DATA_DIR')) { $settings.OCR_DATA_DIR } else { Join-Path $shared 'data' }
 if (-not $StorageRoot) {
     $StorageRoot = if ($settings.ContainsKey('OCR_STORAGE_ROOT')) { $settings.OCR_STORAGE_ROOT } else { $shared }
@@ -87,7 +97,7 @@ $oldBytes = if ($oldFiles) { ($oldFiles | Measure-Object Length -Sum).Sum } else
 $spaceNeeded = 1536MB + 512MB + [long]$oldBytes
 if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($storage)).AvailableFreeSpace -lt $spaceNeeded) { throw 'Private storage cannot preserve the safety reserve and existing documents.' }
 if ($ReuseRuntime) {
-    if (-not $previousTask -or -not (Test-Path -LiteralPath (Join-Path $runtime '.venv\Scripts\python.exe'))) { throw 'No existing runtime is available to reuse.' }
+    if (-not $previousTask -or -not (Test-Path -LiteralPath ($previousTask.Actions[0].Execute.Trim('"')))) { throw 'No existing runtime is available to reuse.' }
     $previousRequirements = Join-Path $previousTask.Actions[0].WorkingDirectory 'requirements.txt'
     if ((Get-FileHash -LiteralPath $previousRequirements).Hash -ne (Get-FileHash -LiteralPath (Join-Path $sourceRoot 'requirements.txt')).Hash) { throw 'Dependencies changed; reusing the runtime is not allowed.' }
 }
@@ -137,9 +147,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $release 'serve.py'))) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not archive the pushed revision.' }
     Expand-Archive -LiteralPath $archive -DestinationPath $release
 }
-$runtimePython = Join-Path $runtime '.venv\Scripts\python.exe'
+$venv = Join-Path $runtime "$revision\.venv"
+$runtimePython = if ($ReuseRuntime) { $previousTask.Actions[0].Execute.Trim('"') } else { Join-Path $venv 'Scripts\python.exe' }
 if (-not (Test-Path -LiteralPath $runtimePython)) {
-    & $Python -m venv (Join-Path $runtime '.venv')
+    & $Python -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the production environment.' }
 }
 $env:TEMP = $tempPath
@@ -149,6 +160,10 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 if (-not $ReuseRuntime) {
     & $runtimePython -B -m pip install --no-cache-dir -r (Join-Path $release 'requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
+}
+$stagedIdentity = & $runtimePython -B (Join-Path $sourceRoot 'scripts\release_gate.py') identity --settings $settingsPath --tesseract $Tesseract
+if ($LASTEXITCODE -ne 0 -or ($stagedIdentity | ConvertFrom-Json).runtime_fingerprint -ne $gate.runtime_fingerprint) {
+    throw 'The staged runtime does not match tested dependencies and native models.'
 }
 $validationRoot = Join-Path (Split-Path -Parent $storage) "ocr-release-tests\$revision"
 Push-Location -LiteralPath $release
@@ -175,7 +190,7 @@ $settings.OCR_LOG_DIR = $logPath
 $settings.OCR_TESSDATA_DIR = Join-Path $release 'tessdata'
 $settings.OCR_TESSERACT_ONLY = '1'
 $settings.TESSERACT_CMD = $Tesseract
-$settings.OMP_THREAD_LIMIT = '2'
+$settings.OMP_THREAD_LIMIT = '1'
 $localKey = Join-Path $sourceRoot 'api_key.txt'
 if (Test-Path -LiteralPath $localKey) { $settings.GOOGLE_API_KEY = (Get-Content -LiteralPath $localKey -Raw).Trim() }
 $proxyConfig = Join-Path $proxyRoot 'web.config'
@@ -258,7 +273,10 @@ $healthy = $false
 for ($attempt = 0; $attempt -lt 20; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri 'http://127.0.0.1:15101/healthz' -TimeoutSec 3
-        if ($health.status -eq 'ok' -and $health.release -eq $revision) { $healthy = $true; break }
+        if ($health.status -eq 'ok' -and $health.release -eq $revision -and $health.runtime_fingerprint -eq $gate.runtime_fingerprint) {
+            $healthy = $true
+            break
+        }
     } catch { Start-Sleep -Seconds 1 }
 }
 if (-not $healthy) {
@@ -313,7 +331,10 @@ if ($certificate) {
         $manager.CommitChanges()
     } finally { $manager.Dispose() }
 }
-[pscustomobject]@{Release=$revision;PublicUrl='https://ocr.gomrok.org';Health=$healthy;ReleasePath=$release}
+Copy-Item -LiteralPath (Join-Path $release 'iis\web.config') -Destination $proxyConfig -Force
+& $runtimePython -B (Join-Path $release 'scripts\smoke_release.py') --commit $revision --fingerprint $gate.runtime_fingerprint --mode $health.pipeline_mode
+if ($LASTEXITCODE -ne 0) { throw 'Public OCR smoke failed; restoring the previous release.' }
+[pscustomobject]@{Release=$revision;PublicUrl='https://ocr.gomrok.org';Health=$healthy;ReleasePath=$release;Smoke='PASS'}
 $committed = $true
 } finally {
     if (-not $committed -and $taskChanged) {
@@ -321,7 +342,7 @@ $committed = $true
         if ($null -ne $previousSettingsBytes) { [IO.File]::WriteAllBytes($settingsPath, $previousSettingsBytes) }
         if ($previousTask) { Register-ScheduledTask -TaskName $taskName -Action $previousTask.Actions -Principal $previousTask.Principal -Settings $previousTask.Settings -Trigger $previousTask.Triggers -Force | Out-Null; Start-ScheduledTask -TaskName $taskName }
     }
-    if ($pauseOwned -and $null -ne $proxyBefore) {
+    if ($null -ne $proxyBefore) {
         if ($committed) { Copy-Item -LiteralPath (Join-Path $release 'iis\web.config') -Destination $proxyConfig -Force }
         else { [IO.File]::WriteAllBytes($proxyConfig, $proxyBefore) }
     }

@@ -123,9 +123,9 @@ def _recognize(directory: str, tessdata: str, png: bytes, psm: int,
 class NativePool:
     """At most four child processes, owned and destroyed by one document."""
 
-    def __init__(self, directory: Path, tessdata: Path):
+    def __init__(self, directory: Path, tessdata: Path, *, workers: int | None = None):
         self.directory, self.tessdata = str(directory), str(tessdata)
-        self.workers = min(4, max(1, (os.cpu_count() or 1) // 2))
+        self.workers = min(4, max(1, workers if workers is not None else (os.cpu_count() or 1) // 2))
         self.lock = threading.Lock()
         self.slots = threading.BoundedSemaphore(self.workers)
         self.pool = MP.get_context('spawn').Pool(processes=self.workers)

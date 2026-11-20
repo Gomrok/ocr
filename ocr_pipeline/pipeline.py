@@ -11,10 +11,12 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -29,6 +31,7 @@ from . import render as R
 from . import tables as T
 from .metrics import Metrics
 from .quality import CONF_REVIEW, page_quality, quality_notice
+from .storage import atomic_json, atomic_text, file_sha256
 
 WORK_DPI = 500      # تحلیل تا ۵۰۰ DPI؛ مسترهای کم‌وضوح دوباره کوچک نمی‌شوند.
 
@@ -102,6 +105,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     words_all: list[dict] = []
     text_parts: list[str] = []
     tables_out: list[dict] = []
+    region_reads: dict[int, dict] = {}
     table_files: list[str] = []
     low_conf = 0
     page_engines: set[str] = set()
@@ -133,24 +137,38 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             # مقیاس‌های مختلف تکرار می‌شود (اکثریت غیرخالی برنده — مثل سلول‌ها).
             # پنجرهٔ طلایی ارقام ~33–37px (0.13–0.16 در مستر ۲۰۰۰DPI — تأیید تجربی)
             f0 = P.optimal_ocr_scale(crop)
+            outline = L.outline_mask(crop)
+            region_angle = L.outline_angle(outline) if outline is not None else 0.0
             ladder = [f0, *(min(2.0, fac * reference_scale) for fac in (0.16, 0.13, 0.10))]
             candidates = []
             for fac in dict.fromkeys(round(x, 3) for x in ladder if x >= 0.04):
-                ok, buf = cv2.imencode(
-                    ".png", P.pad_white(P.resize_by_factor(crop, fac)))
+                image, to_unrotated = _region_view(crop, fac, outline, region_angle)
+                ok, buf = cv2.imencode(".png", image)
                 if not ok:
                     continue
-                candidates.append((fac, buf.tobytes()))
+                candidates.append((fac, buf.tobytes(), to_unrotated))
             m.inc("ocr_calls", len(candidates))
             results = []
-            readings = E.ocr_many(engine_list, [png for _, png in candidates], region_kind="text")
-            for (fac, _), r in zip(candidates, readings):
+            kind = "framed_text" if region_angle else "text"
+            readings = E.ocr_many(engine_list, [png for _, png, _ in candidates], region_kind=kind)
+            for (fac, _, transform), r in zip(candidates, readings):
                 if r and r.get("words"):
                     r["_scale"] = fac
+                    if transform is not None:
+                        for word in r["words"]:
+                            word["bbox"] = _enclose(word["bbox"], transform)
                     results.append(r)
             if not results:
                 continue
             res = E.select_consensus(results)
+            _record_region_readings(res, results)
+            region_reads[region_index] = {
+                "outline_mask": outline is not None,
+                "local_rotation": region_angle,
+                "recognition_disagreement": bool(res.get("needs_review")),
+                "readings": [{"text": r["text"], "engine": r.get("engine"), "psm": r.get("psm"),
+                              "scale": r["_scale"], "confidence": r.get("confidence")} for r in results],
+            }
             # HOCR identifiers restart on every subprocess. Namespace them by
             # region and recognition pass before merging words across crops.
             for word in res.get('words') or []:
@@ -173,8 +191,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                 # مقیاس گذر eng: هدف ~35px گلیف (ارقام لاتین بزرگ‌تر از فارسی‌اند)
                 f_eng = max(0.10, min(0.35 * reference_scale, P.optimal_ocr_scale(crop,
                                                                 target_h=35.0)))
-                ok2, buf2 = cv2.imencode(
-                    ".png", P.pad_white(P.resize_by_factor(crop, f_eng)))
+                english, transform = _region_view(crop, f_eng, outline, region_angle)
+                ok2, buf2 = cv2.imencode(".png", english)
                 if ok2:
                     m.inc("ocr_calls")
                     m.inc("fallbacks")
@@ -186,7 +204,7 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                         for x in r_eng.get("words") or []:
                             if x.get('line_id'):
                                 x['line_id'] = f'{region_index}:english:{x["line_id"]}'
-                            bx = x["bbox"]
+                            bx = _enclose(x["bbox"], transform) if transform is not None else x["bbox"]
                             x["bbox"] = tuple(int((v - 30) * k) + 30 for v in bx)
                             ew.append(x)
                         if E.prefer_latin_region(res, r_eng):
@@ -264,12 +282,16 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "render_seconds": master.render_seconds,
         "analysis": analysis,
         "preprocess_ops": ops,
-        "regions": [{"kind": r.kind, "bbox": list(r.bbox)} for r in regions],
+        "regions": [{"kind": r.kind, "bbox": list(r.bbox), **region_reads.get(index, {})}
+                    for index, r in enumerate(regions)],
         "blocks": [{"kind": r.kind, "bbox": list(r.bbox)} for r in regions],
         "lines": lines,
         "words": [{"text": E.display_text(w["text"]), "bbox": list(w["bbox"]),
                    "confidence": w.get("confidence"),
                    "raw_ocr_text": w.get("raw_ocr_text", w["text"]),
+                   "source_bbox": _source_bbox(w["bbox"], W, H, analysis),
+                   **{key: w[key] for key in ("review_reason", "recognition_readings",
+                                              "numeric_status", "numeric_reading") if key in w},
                    **({'line_id': w['line_id']} if w.get('line_id') else {}),
                    **({"numeric_verified": True} if w.get("numeric_verified") else {}),
                    **({"recognition_repaired": True} if w.get("recognition_repaired") else {}),
@@ -282,6 +304,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
         "digit_style": "persian",
         "tables": [{"table_id": t["table_id"], "rows": t["rows"],
                     "columns": t["columns"],
+                    "cells": [{**cell, "source_bbox": _source_bbox(cell["bbox"], W, H, analysis)}
+                              for cell in t["cells"]],
                     "markdown": T.markdown_table(t)} for t in tables_out],
         "confidence": page_conf,
         "engines": sorted(page_engines) if page_engines else [engine_list[0].name],
@@ -299,6 +323,65 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
     page_res["_table_files"] = table_files
     img = proc = proc_small = None
     return page_res
+
+
+def _source_bbox(box, width, height, analysis):
+    if not analysis["needs_deskew"]:
+        return list(box)
+    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), -analysis["skew_angle"], 1.0)
+    a, b, c, d = _enclose(box, matrix)
+    return [max(0, a), max(0, b), min(width, c), min(height, d)]
+
+
+def _enclose(box, matrix):
+    x0, y0, x1, y1 = box
+    corners = np.array([[x0,y0], [x0,y1], [x1,y0], [x1,y1]], dtype=float)
+    points = corners @ matrix[:, :2].T + matrix[:, 2]
+    return (float(points[:, 0].min()), float(points[:, 1].min()),
+            float(points[:, 0].max()), float(points[:, 1].max()))
+
+
+def _region_view(crop, scale, outline, angle):
+    scaled = P.resize_by_factor(crop, scale)
+    if outline is not None:
+        mask = cv2.resize(outline, (scaled.shape[1], scaled.shape[0]), interpolation=cv2.INTER_NEAREST)
+        scaled = scaled.copy()
+        scaled[mask > 0] = 255
+    if not angle:
+        return P.pad_white(scaled), None
+    extra = int(abs(angle) * max(scaled.shape) * .01) + 1
+    padded = P.pad_white(scaled, 30 + extra)
+    height, width = padded.shape
+    inverse = cv2.getRotationMatrix2D((width / 2, height / 2), -angle, 1.0)
+    inverse[:, 2] -= extra
+    return P.deskew(padded, angle), inverse
+
+
+def _record_region_readings(selected, results):
+    """Carry localized disagreements through renumbering and later OCR repairs."""
+    if not selected.get("needs_review"):
+        return
+
+    def box(word, scale):
+        return tuple((value - 30) / scale for value in word["bbox"])
+
+    best_scale = selected["_scale"]
+    alternatives = [(reading, [(word, box(word, reading["_scale"])) for word in reading["words"]])
+                    for reading in results if reading["words"] is not selected["words"]]
+    for word in selected["words"]:
+        word_box = box(word, best_scale)
+        for reading, positions in alternatives:
+            other, overlap = None, .35
+            for alternate, alternate_box in positions:
+                score = E._iou(word_box, alternate_box)
+                if score > overlap:
+                    other, overlap = alternate, score
+            if other and _norm_digits(other["text"]) != _norm_digits(word["text"]):
+                word.setdefault("recognition_readings", []).append({
+                    "text": other["text"], "confidence": other.get("confidence"),
+                    "engine": reading.get("engine"), "scale": reading["_scale"], "psm": reading.get("psm"),
+                })
+                word.update(needs_review=True, review_reason="recognition_disagreement")
 
 
 def _ink_tight_crop(crop: np.ndarray, margin: int = 14) -> np.ndarray:
@@ -474,7 +557,7 @@ def _script_digit_read(engine_list: list[E.OCREngine], glyph: np.ndarray,
     crop = _ink_tight_crop(glyph, margin=0)
     images = []
     for target in (60, 100):
-        factor = min(2.0, target / max(1, crop.shape[0]), 3500 / max(crop.shape))
+        factor = min(6.0, target / max(1, crop.shape[0]), 3500 / max(crop.shape))
         if any(round(size * factor) < 1 for size in crop.shape):
             return None
         ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(crop, factor)))
@@ -500,7 +583,7 @@ def _script_digit_read(engine_list: list[E.OCREngine], glyph: np.ndarray,
         return digit
     images = []
     for target in (44, 80):
-        factor = min(2.0, target / max(1, crop.shape[0]), 3500 / max(crop.shape))
+        factor = min(6.0, target / max(1, crop.shape[0]), 3500 / max(crop.shape))
         if any(round(size * factor) < 1 for size in crop.shape):
             return None
         ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(crop, factor)))
@@ -590,21 +673,24 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
     baseline = float(np.median([b[1] + b[3] for b in bases if b[3] >= 0.65 * med_h]))
     out = []
     confirmed_positions = []
+    independent_positions = []
+    evidence = []
     uncertain = False
     glyphs = []
     images = []
     for glyph_index, (x, y, w, h) in enumerate(bases):
         if expected_text is not None and not expected_text[glyph_index].isdigit():
-            glyphs.append((expected_text[glyph_index], []))
+            char = expected_text[glyph_index]
+            glyphs.append((char, [char != '/' or _is_slash(bw[y:y+h, x:x+w])]))
             continue
         if detect_separators and h >= .65 * med_h and _is_slash(bw[y:y+h, x:x+w]):
-            glyphs.append(('/', []))
+            glyphs.append(('/', [True]))
             continue
         if (expected_text is None and h < 0.65 * med_h and w < h
                 and y + h > baseline + 0.15 * med_h):
             # A comma descends below the digit baseline; Persian zero does not.
             # Keep the visible separator instead of feeding it to a digit-only pass.
-            glyphs.append((',', []))
+            glyphs.append((',', [True]))
             continue
         # قانون شکل صفر فارسی: دایرهٔ کوچکِ در نیمهٔ پایینیِ نوار ارقام
         if (h < 0.60 * hmax and 0.65 * h <= w <= 1.8 * h
@@ -621,7 +707,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
         # هدف 80px — کالیبره‌شده روی تست confusion ارقام (۳/۴ در ارتفاع کم مخلوط می‌شوند)
         # We already know this glyph's ink height. The paragraph estimator
         # excludes tall components and can leave a single 2000-DPI digit huge.
-        f = min(2.0, 80.0 / h, 3500.0 / max(g.shape))
+        f = min(5.0, 80.0 / h, 3500.0 / max(g.shape))
         indices = []
         for fac in dict.fromkeys([f, round(f * 0.55, 3)]):
             if any(round(size * fac) < 1 for size in g.shape):
@@ -634,40 +720,56 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             images.append(buf.tobytes())
         glyphs.append((g, indices))
     m.inc("ocr_calls", len(images))
-    readings = E.ocr_many(engine_list, images, region_kind="glyph",
+    kind = "glyph_verify" if expected_text is not None else "glyph"
+    readings = E.ocr_many(engine_list, images, region_kind=kind,
                           whitelist=DIGIT_WHITELIST)
     for g, indices in glyphs:
+        position = len(out)
         if isinstance(g, str):
-            confirmed_positions.append(len(out))
+            if indices[0]:
+                confirmed_positions.append(position)
+            else:
+                uncertain = True
+            evidence.append({"position": position, "selected": g, "provenance": "separator_shape_or_original"})
             out.append(g)
             continue
         if g is None:
-            confirmed_positions.append(len(out))
-            out.append("۰")
+            # The isolated mark could be a decimal point or scan noise. A
+            # shape-only zero is usable if it preserves an observed zero.
+            same_zero = expected_text is None or _norm_digits(expected_text[position]) == '0'
+            if same_zero:
+                confirmed_positions.append(position)
+            else:
+                uncertain = True
+            evidence.append({"position": position, "selected": "۰", "provenance": "round_mark_at_baseline"})
+            out.append("۰" if same_zero else "?")
             continue
         reads = []
+        attempted = []
         for index in indices:
             res = readings[index] or {}
             ch = (res.get("text") or "").strip().replace("\n", " ")
-            if (len(ch) == 1 and ch in DIGIT_WHITELIST
-                    and (not detect_separators or E.result_confidence(res) >= .50)):
+            confidence = E.result_confidence(res)
+            attempted.append({"text": ch, "confidence": confidence, "model": "primary"})
+            if len(ch) == 1 and ch in DIGIT_WHITELIST and confidence >= .50:
                 reads.append(ch)
         agreed = len(reads) >= 2 and len({_norm_digits(ch) for ch in reads}) == 1
         if not agreed:
             # Only disputed glyphs pay for a tie-breaker. Do not pick the first
             # reading simply because it was scheduled first.
-            factor = min(2.0, 60.0 / max(1, _ink_tight_crop(g, margin=0).shape[0]),
+            factor = min(5.0, 60.0 / max(1, _ink_tight_crop(g, margin=0).shape[0]),
                          3500.0 / max(g.shape))
             ok, encoded = (False, None)
             if all(round(size * factor) >= 1 for size in g.shape):
                 ok, encoded = cv2.imencode('.png', P.pad_white(P.resize_by_factor(g, factor)))
             if ok and all(encoded.tobytes() != images[index] for index in indices):
                 m.inc('ocr_calls')
-                extra = E.ocr_many(engine_list, [encoded.tobytes()], region_kind='glyph',
+                extra = E.ocr_many(engine_list, [encoded.tobytes()], region_kind=kind,
                                    whitelist=DIGIT_WHITELIST)[0] or {}
                 ch = extra.get('text', '').strip()
-                if (len(ch) == 1 and ch in DIGIT_WHITELIST
-                        and (not detect_separators or E.result_confidence(extra) >= .50)):
+                confidence = E.result_confidence(extra)
+                attempted.append({"text": ch, "confidence": confidence, "model": "primary"})
+                if len(ch) == 1 and ch in DIGIT_WHITELIST and confidence >= .50:
                     reads.append(ch)
             counts = {digit: sum(_norm_digits(ch) == digit for ch in reads)
                       for digit in map(_norm_digits, reads)}
@@ -675,11 +777,27 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             agreed = winner is not None and counts[winner] >= 2
             if agreed:
                 reads = [next(ch for ch in reads if _norm_digits(ch) == winner)]
-        if not agreed or (detect_separators and reads and _norm_digits(reads[0]) in '3469'):
+        expected = _norm_digits(expected_text[position]) if expected_text is not None else None
+        primary = _norm_digits(reads[0]) if reads else ""
+        confusable = primary in {"2", "3", "4", "5", "6", "9"} or expected in {"3", "4", "6"}
+        differs = expected is not None and expected != primary
+        require_other = (expected is not None or detect_separators) and (confusable or differs)
+        if not agreed or require_other:
             alternate = _script_digit_read(engine_list, g, m)
+            attempted.append({"text": alternate, "model": "Arabic"})
             if alternate is not None:
-                reads = [alternate.translate(str.maketrans(EN_DIGIT_CHARS, FA_DIGIT_CHARS))]
-                agreed = True
+                # A model disagreement may repair 4/6 when the alternate has
+                # two clean readings. Other substitutions need agreement with
+                # the primary glyph or the text already seen on the page.
+                permitted = not primary or alternate in {primary, expected} or {primary, alternate} <= {"3", "4", "6", "9"}
+                if permitted:
+                    reads = [alternate.translate(str.maketrans(EN_DIGIT_CHARS, FA_DIGIT_CHARS))]
+                    agreed = True
+                    independent_positions.append(position)
+                else:
+                    agreed = False
+            elif require_other:
+                agreed = False
         if agreed:
             confirmed_positions.append(len(out))
         else:
@@ -688,109 +806,94 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             out.append("?")
             uncertain = True
         else:
-            # قانون شکل ۳/۴ (استخراجی — بخش ۲۹، تأیید روی گلیف واقعی و مرجع فونت):
-            # ۳ در نوارِ راستِ گلیف یک ران پیوسته دارد؛ ۴ دو ران (ران بالای کوچک +
-            # ساقهٔ پایینی جدا). بدون این، ۴ در ۲۰۰۰DPI اغلب ۳ خوانده می‌شود.
-            if reads[0] == "۳":
-                gb = (cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV +
-                                    cv2.THRESH_OTSU)[1] > 0)
-                band = gb[:, int(0.72 * g.shape[1]):]
-                proj = band.sum(axis=1)
-                thr = max(1.0, 0.05 * band.shape[1])
-                min_run = max(2, int(0.10 * g.shape[0]))
-                runs, inr, rs = 0, False, 0
-                for yy, v in enumerate(proj > thr):
-                    if v and not inr:
-                        inr, rs = True, yy
-                    elif not v and inr:
-                        inr = False
-                        if yy - rs >= min_run:
-                            runs += 1
-                if inr and g.shape[0] - rs >= min_run:
-                    runs += 1
-                if runs >= 2:
-                    reads[0] = "۴"
             out.append(reads[0])
+        evidence.append({"position": position, "selected": out[-1], "readings": attempted})
     text = "".join(out).replace("\u200c", "").strip()
     if not text:
         return {"text": ""}
-    if uncertain:
-        return {"text": text, "engine": "glyph_pass", "confidence": None,
-                "needs_review": True, "confirmed_positions": confirmed_positions}
     return {"text": text, "engine": "glyph_pass", "confidence": None,
-            "confirmed_positions": confirmed_positions}
+            "needs_review": uncertain, "confirmed_positions": confirmed_positions,
+            "independent_positions": independent_positions, "glyph_evidence": evidence}
+
+
+_NUMBER = re.compile(r"[+\-−]?[0-9۰-۹٠-٩]+(?:[.,،٫٬/:\-‐‑–][0-9۰-۹٠-٩]+)*[%٪]?")
 
 
 def _verify_text_numbers(words: list[dict], source: np.ndarray,
                          engines: list[E.OCREngine], metrics: Metrics, dpi: int = 2000) -> None:
-    """Verify confusable Persian numerals from isolated glyphs in the master.
-
-    Keep the initial reading for audit, and flag any disagreement for review.
-    Uncertain, incomplete, or mixed-text candidates never replace the original.
-    """
-    remaining = 16  # Bound extra OCR work per page.
+    """Review location-linked numeric readings without overwriting unsupported values."""
     height, width = source.shape[:2]
-    # Dates/identifiers and four-digit values must not lose their verification
-    # budget to false numeric readings in a letterhead or footer.
-    candidates = [word for word in words if not word.get('numeric_verified')
-                  and re.fullmatch(r"[۰-۹][۰-۹,٬٫./-]{1,23}", word.get('text', ''))
-                  and (set(word['text']) & {'۲', '۳'}
-                       or re.fullmatch(r'۱[۰-۹]{3}', word['text']))]
-    candidates.sort(key=lambda word: (not bool(re.search(r'[/.-]', word['text'])),
-                                      len(word['text']) != 4))
-    latin_words = [word for word in words if word.get('bbox')
-                   and re.search(r'[A-Za-z]{3,}', word.get('text', ''))]
-    for word in candidates:
+    candidates = []
+    for word in words:
         original = word.get("text", "")
-        x0, y0, x1, y1 = word['bbox']
-        latin_neighbour = y0 > .85 * height and any(
-                              abs((other['bbox'][1]+other['bbox'][3]-y0-y1)/2) <= y1-y0
-                              and max(0, other['bbox'][0]-x1, x0-other['bbox'][2]) <= 6*(y1-y0)
-                              for other in latin_words)
-        if y0 > .85 * height and ((word.get('confidence') or 0) >= .85 or latin_neighbour):
-            # Footer contact details often overlap rules or Latin text. An
-            # isolated glyph vote must not overwrite a confident full-word read.
-            if latin_neighbour and (word.get('confidence') or 0) < .85:
-                word['needs_review'] = True
+        alternatives = [item["text"] for item in word.get("recognition_readings", []) if item.get("text")]
+        pattern_read = next((text for text in [original, *alternatives]
+                             if _NUMBER.fullmatch(text.strip("()[]،؛"))), None)
+        if pattern_read is None or not word.get("bbox") or word.get("numeric_verified"):
+            if _NUMBER.search(original):
+                word.setdefault("numeric_status", "observed")
             continue
-        if not remaining:
-            word["needs_review"] = True
+        candidates.append((word, pattern_read))
+    candidates.sort(key=lambda pair: (
+        not any(sep in pair[1] for sep in "/:.٫"), len(pair[1]) != 4,
+        not pair[0].get("recognition_readings"), pair[0].get("confidence") or 0,
+    ))
+    # A budget in glyphs scales with page density, rather than discarding
+    # every field after the first sixteen. Deferred fields retain their bbox.
+    remaining = min(640, max(48, len(candidates) * 5 + len(words) // 3))
+    for word, reading in candidates:
+        original = word["text"]
+        token = _NUMBER.search(reading)
+        expected = token.group()
+        digit_count = sum(ch.isdecimal() for ch in expected)
+        x0, y0, x1, y1 = word["bbox"]
+        word.setdefault("raw_ocr_text", original)
+        word["numeric_status"] = "unresolved"
+        if len(expected) > 24 or digit_count > remaining:
+            word.update(needs_review=True, numeric_status="deferred", review_reason="numeric_budget_deferred")
             continue
-        remaining -= 1
-        pad = max(4, int((y1 - y0) * 0.04))
-        crop = source[max(0, y0 - pad):min(height, y1 + pad),
-                      max(0, x0 - pad):min(width, x1 + pad)]
+        if y1 <= y0 or x1 <= x0:
+            word.update(needs_review=True, review_reason="numeric_unresolved")
+            continue
+        remaining -= digit_count
+        pad = max(1, int((y1 - y0) * .035))
+        crop = source[max(0, y0-pad):min(height, y1+pad), max(0, x0-pad):min(width, x1+pad)]
         if not crop.size:
-            word["needs_review"] = True
+            word.update(needs_review=True, review_reason="numeric_unresolved")
             continue
         try:
-            separators = any(not char.isdigit() for char in original)
-            result = _glyph_digit_ocr(engines, crop, metrics, dpi=dpi,
-                                      **({'expected_text': original} if separators else {}))
+            result = _glyph_digit_ocr(
+                engines, crop, metrics, dpi=dpi, expected_text=expected,
+            )
         except (RuntimeError, OSError, ValueError):
-            word["needs_review"] = True
+            word.update(needs_review=True, review_reason="numeric_unresolved")
             continue
         candidate = _norm_digits(result.get("text", ""))
-        if (not re.fullmatch(r"[0-9][0-9,٬٫./-]{1,23}", candidate)
-                or len(candidate) != len(original)
-                or [(i, c) for i, c in enumerate(candidate) if not c.isdigit()]
-                != [(i, c) for i, c in enumerate(original) if not c.isdigit()]):
-            word["needs_review"] = True
+        word["numeric_reading"] = {"text": result.get("text", ""), "engine": "glyph_pass",
+                                   "glyphs": result.get("glyph_evidence", [])}
+        if (len(candidate) != len(expected)
+                or [(i, c) for i, c in enumerate(candidate) if not c.isdecimal() and c != "?"]
+                != [(i, c) for i, c in enumerate(expected) if not c.isdecimal()]):
+            word.update(needs_review=True, review_reason="numeric_unresolved")
             continue
-        if result.get('needs_review'):
-            positions = result.get('confirmed_positions', [])
-            if not positions:
-                word['needs_review'] = True
-                continue
-            candidate = ''.join(char if index in positions else _norm_digits(original[index])
-                                for index, char in enumerate(candidate))
-            word['needs_review'] = True
-        verified = candidate.translate(str.maketrans(EN_DIGIT_CHARS, FA_DIGIT_CHARS))
-        word["numeric_verified"] = not result.get('needs_review', False)
-        word.setdefault("raw_ocr_text", original)
-        if verified != original:
-            word["text"] = verified
-            word["needs_review"] = True
+        # Only edit positions supported by the separately trained glyph model.
+        # This preserves a clean word when glyph segmentation reads ۹ as ۵.
+        independent = set(result.get("independent_positions", []))
+        original_digits = _norm_digits(expected)
+        chosen = "".join(new if new.isdecimal() and i in independent else old
+                         for i, (new, old) in enumerate(zip(candidate, original_digits)))
+        whole_read = ("?" not in candidate and not result.get("needs_review") and chosen == candidate)
+        if reading != original and not (whole_read and len(independent) == digit_count):
+            word.update(needs_review=True, review_reason="numeric_unresolved")
+            continue
+        word["text"] = reading[:token.start()] + E.display_text(chosen) + reading[token.end():]
+        disagreed = candidate != original_digits or reading != original
+        if disagreed or not whole_read:
+            word.update(needs_review=True, review_reason="numeric_disagreement" if disagreed else "numeric_unresolved")
+        if whole_read:
+            word["numeric_status"] = "checked"
+            word["numeric_verified"] = True
+
 
 
 def _recover_header_numbers(words: list[dict], source: np.ndarray,
@@ -836,6 +939,10 @@ def _recover_header_numbers(words: list[dict], source: np.ndarray,
         word.setdefault('raw_ocr_text', original)
         word['text'] = E.display_text(candidate)
         word['numeric_verified'] = True
+        word['numeric_status'] = "checked"
+        word['review_reason'] = "numeric_disagreement"
+        word['numeric_reading'] = {"text": result["text"], "engine": "glyph_pass",
+                                   "glyphs": result.get("glyph_evidence", [])}
         word['recognition_repaired'] = True
 
 
@@ -969,7 +1076,8 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
                 max_pages: int = 0, debug: bool = True,
                 langs: str = "fas", progress_cb=None, *, mode: str | None = None,
                 candidate_options=None, temp_root: Path | None = None,
-                handwriting: bool = False) -> dict:
+                handwriting: bool = False, resume: bool = False, keep_masters: bool = True,
+                render_budget_mp: float = R.MAX_RENDER_MP) -> dict:
     """Own native workers and PDF handles, including exceptional exits."""
     if api_key:
         raise ValueError("External document APIs are disabled; use local Tesseract")
@@ -986,7 +1094,8 @@ def process_pdf(pdf_path: Path, out_dir: Path, dpi: int = 2000,
     reuse = os.environ.get('OCR_PERSISTENT_ENGINE', '1') != '0'
     with E.TesseractEngine(langs, reuse_model=reuse) as local, pymupdf.open(pdf_path) as doc:
         payload = _process_document(doc, local, pdf_path, out_dir, dpi, api_key,
-                                    True, max_pages, debug, progress_cb, handwriting=handwriting)
+                                    True, max_pages, debug, progress_cb, handwriting=handwriting,
+                                    resume=resume, keep_masters=keep_masters, render_budget_mp=render_budget_mp)
     if mode == "compare":
         try:
             candidate = _candidate_document(pdf_path, out_dir, candidate_options, temp_root,
@@ -1015,100 +1124,157 @@ def _candidate_document(source, out_dir, options, temp_root, max_pages, callback
     return result
 
 
-def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
-                       force_tesseract, max_pages, debug, progress_cb, *, handwriting=False):
-    """پردازش کامل یک PDF — مستر 2000DPI (بخش ۳۰)."""
-    t0 = time.perf_counter()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    master_dir = out_dir / "master"
-    master_dir.mkdir(parents=True, exist_ok=True)
+def _checkpoint_key(source_hash, engine, dpi, render_budget_mp, n_pages, debug, handwriting):
+    code_root = Path(__file__).resolve().parent
+    models = {path.name: file_sha256(path) for path in sorted(engine.tessdata_dir.glob("*.traineddata"))}
+    executable = file_sha256(Path(engine.executable)) if engine.executable else None
+    identity = (source_hash, dpi, render_budget_mp, n_pages, bool(debug), bool(handwriting), engine.langs,
+                models, executable, cv2.__version__, pymupdf.VersionBind, np.__version__,
+                engine._reuse_model, os.environ.get("OMP_THREAD_LIMIT"), engine.workers,
+                {path.name: file_sha256(path) for path in sorted(code_root.glob("*.py"))})
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
-    engine_list: list[E.OCREngine] = [local_engine]
-    engine = E.pick_engine(engine_list)
 
-    n_pages = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
-    if progress_cb:
-        progress_cb({"type": "start", "pages": n_pages, "dpi": dpi})
+def _read_checkpoint(path, key, page, out_dir):
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        result = data["page"]
+        if data["key"] != key or result["page"] != page or result.get("error"):
+            return None
+        if not all((out_dir / name).is_file() for name in result.get("artifacts", [])):
+            return None
+        return result
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
-    pages_res = []
-    all_table_files: list[str] = []
 
-    for i in range(n_pages):
-        m = Metrics()
-        engine_before = engine_list[-1].statistics()
+def _extract_page(doc, number, master_dir, out_dir, filename, engine, dpi, debug, handwriting,
+                  keep_masters, render_budget_mp):
+    for attempt in (1, 2):
+        metrics = Metrics()
+        before = engine.statistics()
+        master_path = master_dir / f"master_p{number:04d}{R.TIFF_EXT}"
         try:
-            with m.step("render"):
-                master = R.render_master(doc[i], i + 1, master_dir, dpi=dpi)
-            res = ocr_page(master, engine_list, m,
-                           out_dir / "debug" if debug else None, i + 1)
-            res["metrics"].update({key: value - engine_before[key]
-                                   for key, value in engine_list[-1].statistics().items()})
-            res["filename"] = pdf_path.name
-            res["quality"] = page_quality(res, handwriting=handwriting)
-            res["export_annotations"] = ([] if res.get("status") == "blank" else
-                                         [{"kind": "quality_notice", "text": quality_notice(res["quality"])}])
-            for f in res.pop("_table_files", []):
-                all_table_files.append(f)
-            pages_res.append(res)
-            if progress_cb:
-                progress_cb({"type": "page_ok", "page": i + 1,
-                             "words": len(res.get("words", [])),
-                             "needs_review": res["quality"]["review_required"],
-                             "tables": len(res.get("tables", [])),
-                             "source": (res.get("engines") or [engine.name])[0]})
-        except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).exception("OCR failed on page %d", i + 1)
+            with metrics.step("render"):
+                if shutil.disk_usage(master_dir).free < 1536 * 2**20:
+                    raise OSError("Insufficient OCR scratch space")
+                master = R.render_master(doc[number - 1], number, master_dir, dpi=dpi, max_mp=render_budget_mp)
+            result = ocr_page(master, [engine], metrics, out_dir / "debug" if debug else None, number)
+            result["metrics"].update({key: value - before[key] for key, value in engine.statistics().items()})
+            result["master_bytes"] = master.path.stat().st_size
+            result["filename"] = filename
+            result["attempts"] = attempt
+            result["quality"] = page_quality(result, handwriting=handwriting)
+            result["export_annotations"] = ([] if result.get("status") == "blank" else
+                                             [{"kind": "quality_notice", "text": quality_notice(result["quality"])}])
+            paths = [out_dir / "tables" / name for name in result.pop("_table_files", [])]
+            debug_path = out_dir / "debug" / f"page_{number:03d}_layout.png"
+            if debug and result.get("tables") and debug_path.is_file():
+                paths.append(debug_path)
+            result["artifacts"] = [path.resolve().relative_to(out_dir).as_posix() for path in paths]
+            return result
+        except Exception as exc:  # Keep the failure local to the affected page.
+            logging.getLogger(__name__).warning("OCR page %d attempt %d failed", number, attempt, exc_info=True)
             reason = {"PDF render lost visible page content": "render_content_lost",
                       "Incomplete PDF render tile": "render_tile_incomplete",
-                      "OCR returned no text from a nonblank page": "nonblank_page_no_text"}.get(str(exc), "page_processing_failed")
-            failed_page = {"page": i + 1, "error": reason,
-                           "filename": pdf_path.name, "metrics": m.report()}
-            failed_page["quality"] = page_quality(failed_page, handwriting=handwriting)
-            pages_res.append(failed_page)
-            if progress_cb:
-                progress_cb({"type": "page_error", "page": i + 1, "error": reason})
+                      "OCR returned no text from a nonblank page": "nonblank_page_no_text",
+                      "Insufficient OCR scratch space": "disk_budget_exhausted"}.get(str(exc), "page_processing_failed")
+            # Retrying a deterministic input or capacity error cannot fix it.
+            if attempt == 2 or reason != "page_processing_failed" or isinstance(exc, (MemoryError, ValueError)):
+                failed = {"page": number, "error": reason, "filename": filename,
+                          "attempts": attempt, "metrics": metrics.report()}
+                failed["quality"] = page_quality(failed, handwriting=handwriting)
+                return failed
         finally:
-            m.stop()
+            metrics.stop()
+            if not keep_masters:
+                master_path.unlink(missing_ok=True)
+
+
+def _process_document(doc, local_engine, pdf_path, out_dir, dpi, api_key,
+                      force_tesseract, max_pages, debug, progress_cb, *, handwriting=False,
+                      resume=False, keep_masters=True, render_budget_mp=R.MAX_RENDER_MP):
+    """Preserve completed pages across interruptions of the same document revision."""
+    t0 = time.perf_counter()
+    out_dir = out_dir.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    master_dir = out_dir / ("master" if keep_masters else ".scratch-master")
+    master_dir.mkdir(exist_ok=True)
+    engine = E.pick_engine([local_engine])
+    n_pages = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
+    source_hash = file_sha256(pdf_path)
+    checkpoint_key = (_checkpoint_key(source_hash, local_engine, dpi, render_budget_mp, n_pages, debug, handwriting)
+                      if resume else None)
+    if progress_cb:
+        progress_cb({"type": "start", "pages": n_pages, "dpi": dpi})
+    pages_res = []
+    reused_pages = 0
+    for number in range(1, n_pages + 1):
+        checkpoint = out_dir / ".checkpoints" / f"{number:04d}.json"
+        res = _read_checkpoint(checkpoint, checkpoint_key, number, out_dir) if resume else None
+        reused = res is not None
+        reused_pages += reused
+        if res is None:
+            res = _extract_page(doc, number, master_dir, out_dir, pdf_path.name, local_engine,
+                                dpi, debug, handwriting, keep_masters, render_budget_mp)
+            if resume and not res.get("error"):
+                atomic_json(checkpoint, {"key": checkpoint_key, "page": res})
+        pages_res.append(res)
+        review_items = []
+        for item in [*res.get("words", []), *(cell for table in res.get("tables", [])
+                                             for cell in table.get("cells", []))]:
+            if item.get("needs_review"):
+                review_items.append({"bbox": item.get("source_bbox", item.get("bbox")),
+                                     "text": item.get("text", item.get("normalized_text", ""))[:100],
+                                     "reason": item.get("review_reason", "uncertain_recognition")})
+        atomic_json(out_dir / ".review" / f"{number:04d}.json", review_items[:120])
+        if progress_cb:
+            if res.get("error"):
+                progress_cb({"type": "page_error", "page": number, "error": res["error"]})
+            else:
+                progress_cb({"type": "page_ok", "page": number, "words": len(res.get("words", [])),
+                             "needs_review": res["quality"]["review_required"], "reused": reused,
+                             "tables": len(res.get("tables", [])),
+                             "source": (res.get("engines") or [engine.name])[0]})
 
     stem = pdf_path.stem
-    txt = build_txt(pages_res)
-    (out_dir / f"{stem}.txt").write_text(txt, "utf-8")
-    # Compact metadata lets the preview show warnings without loading a large
-    # extraction or putting system annotations into the copied document text.
+    atomic_text(out_dir / f"{stem}.txt", build_txt(pages_res))
     quality_snapshot = {"pages": [{"page": page["page"], "quality": page["quality"],
-                                    "export_annotations": page.get("export_annotations", [])}
-                                   for page in pages_res]}
-    (out_dir / f"{stem}.quality.json").write_text(
-        json.dumps(quality_snapshot, ensure_ascii=False), "utf-8")
+                                   "export_annotations": page.get("export_annotations", [])}
+                                  for page in pages_res]}
+    atomic_json(out_dir / f"{stem}.quality.json", quality_snapshot)
+    perf = local_engine.statistics()
+    elapsed = time.perf_counter() - t0
     payload = {
-        "document": {"filename": pdf_path.name, "pages": n_pages,
+        "document": {"filename": pdf_path.name, "pages": n_pages, "source_sha256": source_hash,
                      "source_dpi": dpi, "engine": engine.name,
                      "handwriting_declared": bool(handwriting), "human_verified": False},
         "pages": pages_res,
         "performance": {
-            "total_seconds": round(time.perf_counter() - t0, 2),
-            "peak_rss_mb": max((p.get("metrics", {}).get("peak_rss_mb", 0)
-                                for p in pages_res), default=0),
-            "avg_page_seconds": round((time.perf_counter() - t0) / max(n_pages, 1), 2),
+            "total_seconds": round(elapsed, 2),
+            "avg_page_seconds": round(elapsed / max(n_pages, 1), 2),
+            **{key: max((p.get("metrics", {}).get(key, 0) for p in pages_res), default=0)
+               for key in ("peak_rss_mb", "peak_tree_rss_mb", "peak_children_rss_mb")},
+            "master_bytes": sum(p.get("master_bytes", 0) for p in pages_res),
+            "checkpoint_hits": reused_pages, "cache_enabled": local_engine.cache_enabled,
             "ocr_calls": sum(p.get("metrics", {}).get("ocr_calls", 0) for p in pages_res),
-            "ocr_processes": engine_list[-1].statistics()["ocr_processes"],
-            "ocr_cache_hits": engine_list[-1].statistics()["ocr_cache_hits"],
-            "ocr_native_calls": engine_list[-1].statistics().get("ocr_native_calls", 0),
+            "ocr_processes": perf["ocr_processes"],
+            "ocr_cache_hits": perf["ocr_cache_hits"],
+            "ocr_native_calls": perf.get("ocr_native_calls", 0),
             "fallbacks": sum(p.get("metrics", {}).get("fallbacks", 0) for p in pages_res),
-            "low_confidence_regions": sum(p.get("low_confidence_words", 0)
-                                          for p in pages_res),
+            "low_confidence_regions": sum(p.get("low_confidence_words", 0) for p in pages_res),
             "failed_pages": sum(1 for p in pages_res if p.get("error")),
         },
     }
-    (out_dir / f"{stem}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
+    atomic_json(out_dir / f"{stem}.json", payload)
     if progress_cb:
         progress_cb({"type": "done", "pages": n_pages,
-                     "pages_ok": sum(1 for p in pages_res if not p.get("error")),
+                     "pages_ok": n_pages - payload["performance"]["failed_pages"],
                      "words": sum(len(p.get("words", [])) for p in pages_res),
                      "seconds": payload["performance"]["total_seconds"],
                      "txt": f"{stem}.txt", "json": f"{stem}.json"})
     return payload
+
 
 
 def build_txt(pages: list[dict]) -> str:

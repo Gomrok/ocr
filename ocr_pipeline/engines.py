@@ -562,6 +562,7 @@ class TesseractEngine(OCREngine):
         # global cache, and return copies because callers adjust word geometry.
         self._cache: OrderedDict[tuple, tuple[dict, int]] = OrderedDict()
         self._cache_bytes = 0
+        self.cache_enabled = os.environ.get("OCR_DISABLE_CACHE") != "1"
         self._cache_lock = threading.Lock()
         self._processes = 0
         self._cache_hits = 0
@@ -578,6 +579,10 @@ class TesseractEngine(OCREngine):
                       r"C:\Program Files\Tesseract-OCR\tesseract.exe"]
         self.executable = next((path for candidate in candidates
                                 if candidate and (path := shutil.which(candidate))), None)
+
+    @property
+    def workers(self):
+        return min(4, max(1, int(os.environ.get("OCR_NATIVE_WORKERS", (os.cpu_count() or 1) // 2))))
 
     def __enter__(self):
         return self
@@ -605,7 +610,7 @@ class TesseractEngine(OCREngine):
                     return None
                 if self._pool is None:
                     self._pool = NativePool(Path(self.executable).resolve().parent,
-                                            self.tessdata_dir.resolve())
+                                            self.tessdata_dir.resolve(), workers=self.workers)
                     self._pool_starts += self._pool.workers
                 pool = self._pool
             payload = pool.recognize(png, psm, whitelist, language)
@@ -692,7 +697,7 @@ class TesseractEngine(OCREngine):
                   "confidence": sum(confs) / len(confs) if confs else None,
                   "engine": "tesseract", "psm": psm}
         size = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
-        if size <= 256 * 1024:
+        if self.cache_enabled and size <= 256 * 1024:
             with self._cache_lock:
                 previous = self._cache.pop(key, None)
                 if previous:
@@ -764,10 +769,10 @@ class TesseractEngine(OCREngine):
         return parser.words
 
     # PSM بر اساس نوع ناحیه (بخش ۱۶) + PSMهای بازیابی
-    PSM_FOR = {"text": 3, "table_cell": 12, "numeric": 7, "glyph": 10,
+    PSM_FOR = {"text": 3, "framed_text": 6, "table_cell": 12, "numeric": 7, "glyph": 10, "glyph_verify": 10,
                "table": 11, "sparse": 11, "line": 7, "raw_line": 13}
-    RETRY_PSM = {"text": (11, 6), "table_cell": (3, 6), "numeric": (12, 6),
-                 "glyph": (7, 6), "raw_line": ()}
+    RETRY_PSM = {"text": (11, 6), "framed_text": (11, 3), "table_cell": (3, 6), "numeric": (12, 6),
+                 "glyph": (7, 6), "raw_line": (), "glyph_verify": ()}
 
 
 def pick_engine(engines: list[OCREngine]) -> OCREngine:
@@ -804,7 +809,7 @@ def ocr_any(engines: list[OCREngine], png: bytes, region_kind: str = "text",
     def better(r: dict) -> bool:
         if best is None:
             return True
-        if (region_kind == 'text' and not whitelist
+        if (region_kind in ('text', 'framed_text') and not whitelist
                 and len(best.get('words') or []) >= 20 and len(r.get('words') or []) >= 20):
             before = sum(char.isalnum() for char in best.get('text', ''))
             after = sum(char.isalnum() for char in r.get('text', ''))
@@ -882,7 +887,7 @@ def ocr_many(engines: list[OCREngine], images: list[bytes],
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
             return None
 
-    workers = min(4, max(1, (os.cpu_count() or 1) // 2), len(images))
+    workers = min(getattr(engines[0], "workers", 1), len(images)) if engines else 0
     if (workers < 2 or len(engines) != 1 or
             not isinstance(engines[0], TesseractEngine) or not engines[0].native_ok()):
         return [recognize(image) for image in images]

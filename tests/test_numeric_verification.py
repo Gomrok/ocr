@@ -61,26 +61,29 @@ class NumericVerificationTests(unittest.TestCase):
         words = [{'text':'۱۲۳','bbox':(10,10,90,40)} for _ in range(16)]
         year = {'text':'۱۶۰۱','bbox':(10,10,90,40)}
         words.append(year)
-        with patch.object(P,'_glyph_digit_ocr',return_value={'text':'۱۴۰۱'}) as glyph:
+        with patch.object(P,'_glyph_digit_ocr',return_value={'text':'۱۴۰۱','independent_positions':[1]}) as glyph:
             _verify_text_numbers(words,np.full((60,100),255,np.uint8),[],None)
         self.assertEqual(year['text'],'۱۴۰۱')
-        self.assertEqual(glyph.call_count,16)
+        self.assertEqual(glyph.call_args_list[0].kwargs["expected_text"], "۱۶۰۱")
+        self.assertEqual(glyph.call_count,17)
 
     def test_confident_footer_number_is_not_overwritten_by_isolated_glyph(self):
         word={'text':'۴۳۱۱۱','confidence':.92,'bbox':(10,900,90,940)}
-        with patch.object(P,'_glyph_digit_ocr') as glyph:
+        with patch.object(P,'_glyph_digit_ocr',return_value={'text':'۴۳۱۱۹'}) as glyph:
             _verify_text_numbers([word],np.full((1000,100),255,np.uint8),[],None)
         self.assertEqual(word['text'],'۴۳۱۱۱')
-        glyph.assert_not_called()
+        glyph.assert_called_once()
+        self.assertTrue(word["needs_review"])
 
     def test_false_numeric_footer_read_next_to_latin_text_is_not_reinterpreted(self):
         word={'text':'۵۲۸۳','confidence':.5,'bbox':(100,900,200,940)}
         neighbour={'text':'Street','confidence':.95,'bbox':(220,900,350,940)}
-        with patch.object(P,'_glyph_digit_ocr') as glyph:
+        with patch.object(P,'_glyph_digit_ocr',return_value={'text':'۵۲۸۸'}) as glyph:
             _verify_text_numbers([word,neighbour],np.full((1000,500),255,np.uint8),[],None)
         self.assertEqual(word['text'],'۵۲۸۳')
         self.assertTrue(word['needs_review'])
-        glyph.assert_not_called()
+        glyph.assert_called_once()
+        self.assertEqual(word["text"], "۵۲۸۳")
 
     def test_slash_is_not_a_persian_one_or_a_curved_digit(self):
         slash=np.zeros((100,70),np.uint8)
@@ -128,7 +131,8 @@ class NumericVerificationTests(unittest.TestCase):
 
     def test_confirmed_numeric_correction_preserves_original_for_review(self):
         words = [{"text": "۱۳۳۴۵", "bbox": (10, 10, 90, 40), "confidence": 0.92}]
-        with patch("ocr_pipeline.pipeline._glyph_digit_ocr", return_value={"text": "۱۲۳۴۵"}):
+        with patch("ocr_pipeline.pipeline._glyph_digit_ocr",
+                   return_value={"text": "۱۲۳۴۵", "independent_positions": [1]}):
             _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
         self.assertEqual(words[0]["text"], "۱۲۳۴۵")
         self.assertEqual(words[0]["raw_ocr_text"], "۱۳۳۴۵")
@@ -152,14 +156,14 @@ class NumericVerificationTests(unittest.TestCase):
     def test_separator_positions_and_unconfirmed_digits_are_preserved(self):
         words = [{"text": "۱۳۳,۴۵۶", "bbox": (10, 10, 90, 40)}]
         reading = {"text": "۱۲۳,۴۵۲", "needs_review": True,
-                   "confirmed_positions": [0, 1, 2, 3, 4, 5]}
+                   "confirmed_positions": [0, 1, 2, 3, 4, 5], "independent_positions": [1]}
         with patch("ocr_pipeline.pipeline._glyph_digit_ocr", return_value=reading) as glyph:
             _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
         self.assertEqual(glyph.call_args.kwargs['expected_text'], '۱۳۳,۴۵۶')
         self.assertEqual(words[0]['text'], '۱۲۳,۴۵۶')
         self.assertEqual(words[0]['raw_ocr_text'], '۱۳۳,۴۵۶')
         self.assertTrue(words[0]['needs_review'])
-        self.assertFalse(words[0]['numeric_verified'])
+        self.assertFalse(words[0].get('numeric_verified', False))
 
     def test_numeric_recheck_never_drops_separators(self):
         words = [{"text": "۱۳۳,۴۵۶", "bbox": (10, 10, 90, 40)}]
@@ -169,11 +173,20 @@ class NumericVerificationTests(unittest.TestCase):
         self.assertTrue(words[0]['needs_review'])
 
     def test_page_verification_work_is_bounded(self):
-        words = [{"text": "۱۲۳", "bbox": (10, 10, 90, 40)} for _ in range(20)]
-        with patch("ocr_pipeline.pipeline._glyph_digit_ocr", return_value={"text": "۱۲۳"}) as glyph:
+        value = "۱۲۳" * 8
+        words = [{"text": value, "bbox": (10, 10, 90, 40)} for _ in range(150)]
+        with patch("ocr_pipeline.pipeline._glyph_digit_ocr", return_value={"text": value}) as glyph:
             _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
-        self.assertEqual(glyph.call_count, 16)
-        self.assertTrue(all(word["needs_review"] for word in words[16:]))
+        self.assertEqual(glyph.call_count, 640 // len(value))
+        self.assertTrue(all(word["numeric_status"] == "deferred" and not word.get("numeric_verified")
+                            for word in words[glyph.call_count:]))
+
+    def test_digits_of_all_three_scripts_enter_the_same_verification_path(self):
+        inputs = ["۶", "٤", "007", "-04.6", "۱۴:۰۵"]
+        words = [{"text": value, "bbox": (10, 10, 90, 40)} for value in inputs]
+        with patch.object(P, "_glyph_digit_ocr", side_effect=lambda *a, **kw: {"text": kw["expected_text"]}) as glyph:
+            _verify_text_numbers(words, np.full((60,100),255,np.uint8), [], None)
+        self.assertCountEqual([call.kwargs["expected_text"] for call in glyph.call_args_list], inputs)
 
     def test_real_isolated_persian_digits(self):
         engine = TesseractEngine("fas")
