@@ -26,6 +26,7 @@ import pymupdf
 
 from . import engines as E
 from . import layout as L
+from . import numeric_recheck as N
 from . import preprocess as P
 from . import render as R
 from . import tables as T
@@ -52,7 +53,7 @@ def validate_text(raw: str) -> dict:
 
 
 def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
-             debug_dir: Path | None = None, page_no: int = 1) -> dict:
+             debug_dir: Path | None = None, page_no: int = 1, *, source_page: pymupdf.Page | None = None) -> dict:
     """OCR یک صفحه از مستر — معماری ناحیه‌محور، بدون نگه‌داشتن چند نسخهٔ کامل."""
     with m.step("master_read"):
         img = master.read_full()          # مستر 2000DPI (حافظهٔ خط ۲)
@@ -248,6 +249,11 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
             w["needs_review"] = True
         if w.get("needs_review"):
             low_conf += 1
+    model_dir = os.environ.get(N.MODEL_DIR)
+    if model_dir and source_page is not None:
+        with m.step("secondary_numeric_ocr"):
+            N.recheck_numbers(model_dir, words_all, source_page, (W, H),
+                              lambda box: _source_bbox(box, W, H, analysis), m)
     lines = [E.display_text(line) for line in E.words_to_lines(words_all)]
     raw_text = "\n".join(text_parts)
 
@@ -291,7 +297,8 @@ def ocr_page(master: R.MasterPage, engine_list: list[E.OCREngine], m: Metrics,
                    "raw_ocr_text": w.get("raw_ocr_text", w["text"]),
                    "source_bbox": _source_bbox(w["bbox"], W, H, analysis),
                    **{key: w[key] for key in ("review_reason", "recognition_readings",
-                                              "numeric_status", "numeric_reading") if key in w},
+                                              "numeric_status", "numeric_reading", "secondary_numeric_reading")
+                      if key in w},
                    **({'line_id': w['line_id']} if w.get('line_id') else {}),
                    **({"numeric_verified": True} if w.get("numeric_verified") else {}),
                    **({"recognition_repaired": True} if w.get("recognition_repaired") else {}),
@@ -816,7 +823,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
             "independent_positions": independent_positions, "glyph_evidence": evidence}
 
 
-_NUMBER = re.compile(r"[+\-−]?[0-9۰-۹٠-٩]+(?:[.,،٫٬/:\-‐‑–][0-9۰-۹٠-٩]+)*[%٪]?")
+_NUMBER = N.NUMBER
 _NUMERIC_BOUNDARY = "()[]،؛\u061c\u200e\u200f"
 
 
@@ -1135,6 +1142,9 @@ def _checkpoint_key(source_hash, engine, dpi, render_budget_mp, n_pages, debug, 
                 models, executable, cv2.__version__, pymupdf.VersionBind, np.__version__,
                 engine._reuse_model, os.environ.get("OMP_THREAD_LIMIT"), engine.workers,
                 {path.name: file_sha256(path) for path in sorted(code_root.glob("*.py"))})
+    model_dir = os.environ.get(N.MODEL_DIR)
+    if model_dir:
+        identity += (N.model_identity(model_dir),)
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -1161,8 +1171,10 @@ def _extract_page(doc, number, master_dir, out_dir, filename, engine, dpi, debug
             with metrics.step("render"):
                 if shutil.disk_usage(master_dir).free < 1536 * 2**20:
                     raise OSError("Insufficient OCR scratch space")
-                master = R.render_master(doc[number - 1], number, master_dir, dpi=dpi, max_mp=render_budget_mp)
-            result = ocr_page(master, [engine], metrics, out_dir / "debug" if debug else None, number)
+                source_page = doc[number - 1]
+                master = R.render_master(source_page, number, master_dir, dpi=dpi, max_mp=render_budget_mp)
+            result = ocr_page(master, [engine], metrics, out_dir / "debug" if debug else None, number,
+                              source_page=source_page)
             result["metrics"].update({key: value - before[key] for key, value in engine.statistics().items()})
             result["master_bytes"] = master.path.stat().st_size
             result["filename"] = filename

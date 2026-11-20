@@ -13,6 +13,7 @@ from functools import lru_cache
 import psutil
 
 from .storage import file_sha256
+from .numeric_recheck import MODEL_DIR, model_identity
 
 MODELS = ("Arabic.traineddata", "eng.traineddata", "fas.traineddata")
 PROFILE_KEYS = {
@@ -21,6 +22,7 @@ PROFILE_KEYS = {
     "OCR_WORKERS": "2",
     "OCR_RAM_BUDGET_MIB": "4096",
     "OCR_DEFAULT_DPI": "2000",
+    MODEL_DIR: "",
 }
 
 
@@ -67,7 +69,7 @@ def runtime_identity(settings, executable, tessdata):
     packages = ["Flask", "numpy", "opencv-python-headless", "psutil", "pymupdf", "waitress"]
     if vars["OCR_PIPELINE_MODE"] != "legacy":
         packages.append("Pillow")
-    return {
+    identity = {
         "settings": vars,
         "limits": resource_limits(settings),
         "os": platform.system(),
@@ -76,6 +78,9 @@ def runtime_identity(settings, executable, tessdata):
         "packages": {name: version(name) for name in packages},
         "engine": engine_identity(executable, tessdata),
     }
+    if vars[MODEL_DIR]:
+        identity["numeric_recheck"] = model_identity(vars[MODEL_DIR])
+    return identity
 
 
 def current_runtime(engine):

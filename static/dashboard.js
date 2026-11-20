@@ -408,8 +408,6 @@
   function showTextEmpty(message) {
     byId('qualityNotice').hidden = true;
     byId('qualityNotice').textContent = '';
-    byId('reviewItems').replaceChildren();
-    byId('reviewItems').hidden = true;
     byId('pageText').hidden = true;
     byId('copyPageText').disabled = true;
     byId('textEmpty').textContent = message;
@@ -448,21 +446,6 @@
         } else if (!quality.metadata_available) notice += ' جزئیات ابهام این خروجی در دسترس نیست.';
         byId('qualityNotice').textContent = notice;
         byId('qualityNotice').hidden = false;
-        const list = byId('reviewItems');
-        const reasons = {
-          numeric_disagreement: 'اختلاف در خوانش عدد',
-          numeric_unresolved: 'خوانش عدد نامطمئن است',
-          numeric_budget_deferred: 'عدد به بازخوانی نیاز دارد',
-          recognition_disagreement: 'خوانش‌های این ناحیه متفاوت‌اند'
-        };
-        for (const item of quality.review_items || []) {
-          const entry = document.createElement('li');
-          const value = document.createElement('bdi');
-          value.textContent = item.text;
-          entry.append(value, ' · ' + (reasons[item.reason] || 'نیازمند مقایسه با تصویر'));
-          list.append(entry);
-        }
-        list.hidden = !list.childElementCount;
         byId('pageText').textContent = body.text;
         byId('pageText').hidden = false;
         byId('textEmpty').hidden = true;
