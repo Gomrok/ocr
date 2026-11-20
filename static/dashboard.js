@@ -406,8 +406,6 @@
     byId('imageEmpty').hidden = false;
   }
   function showTextEmpty(message) {
-    byId('qualityNotice').hidden = true;
-    byId('qualityNotice').textContent = '';
     byId('pageText').hidden = true;
     byId('copyPageText').disabled = true;
     byId('textEmpty').textContent = message;
@@ -436,16 +434,6 @@
       if (sequence !== previewSequence) return;
       if (!response.ok) throw new Error();
       if (body.state === 'ready') {
-        const quality = body.quality || {};
-        let notice = 'متن خودکار، تأیید انسانی نشده است.';
-        if (quality.status === 'blank') notice = 'این صفحه سفید گزارش شده است.';
-        else if (quality.handwriting_declared) notice = 'سند دارای دست‌نویس اعلام شده است. این خوانش قابل اتکا نیست و باید با تصویر و توسط انسان بازبینی شود.';
-        else if (quality.review_required && quality.metadata_available) notice = 'پیش‌نویس نیازمند بازبینی؛ متن زیر دارای خوانش مشکوک است و نباید متن تأییدشده تلقی شود.';
-        if (Number.isInteger(quality.flagged_items) && quality.flagged_items > 0) {
-          notice += ` ${number(quality.flagged_items)} مورد علامت بازبینی دارد؛ این شمارش، تعداد خطاهای قطعی یا درصد دقت نیست.`;
-        } else if (!quality.metadata_available) notice += ' جزئیات ابهام این خروجی در دسترس نیست.';
-        byId('qualityNotice').textContent = notice;
-        byId('qualityNotice').hidden = false;
         byId('pageText').textContent = body.text;
         byId('pageText').hidden = false;
         byId('textEmpty').hidden = true;
