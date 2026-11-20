@@ -7,6 +7,12 @@ from ocr_pipeline import layout as L
 
 
 class LayoutTests(unittest.TestCase):
+    def test_local_rule_angle_uses_real_hough_output(self):
+        outline = np.zeros((200, 520), np.uint8)
+        for y in (20, 156):
+            cv2.line(outline, (25, y), (493, y + 18), 255, 2)
+        self.assertAlmostEqual(L.outline_angle(outline), 2.2, delta=.55)
+
     @staticmethod
     def table(image, xs, ys):
         for x in xs:

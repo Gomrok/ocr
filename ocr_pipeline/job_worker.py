@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -89,6 +90,11 @@ def run_isolated(source, output, scratch, request, progress):
                     detail = errors.read(700).decode("utf-8", errors="replace")
                     raise WorkerStopped(stopped or detail or "worker_interrupted")
                 result = json.loads((output / (source.stem + ".json")).read_text("utf-8"))
+                if result["performance"]["failed_pages"]:
+                    errors.seek(0)
+                    details = errors.read(4000).decode("utf-8", errors="replace").strip()
+                    if details:
+                        logging.getLogger(__name__).warning("Partial document OCR:\n%s", details)
                 if request["mode"] == "compare":
                     result["comparison"] = json.loads((output / "comparison.json").read_text("utf-8"))
             finally:

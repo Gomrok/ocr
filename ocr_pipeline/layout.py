@@ -163,7 +163,8 @@ def outline_angle(mask: np.ndarray) -> float:
     if lines is None:
         return 0.0
     horizontal = []
-    for x0, y0, x1, y1 in lines[:, 0]:
+    # OpenCV returns either Nx4 or Nx1x4 depending on the binding version.
+    for x0, y0, x1, y1 in np.asarray(lines).reshape(-1, 4):
         dx, dy = int(x1) - int(x0), int(y1) - int(y0)
         if not dx or abs(dy / dx) > .106:
             continue
