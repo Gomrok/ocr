@@ -13,6 +13,28 @@ spec.loader.exec_module(gate)
 
 
 class ReleaseGateTests(unittest.TestCase):
+    def test_compatibility_accepts_multiline_results_only_without_skipped_tests(self):
+        now = datetime.now(timezone.utc)
+        identity = {"commit": "a" * 40}
+        manifest = {"run_id": "1" * 64, "started_at": now.isoformat(), "finished_at": now.isoformat()}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            log = root / "unittest.log"
+            checks = root / "checks.json"
+            proof = root / "proof.json"
+            gate.atomic_json(checks, {"unit_exit_code": 0, "powershell_exit_code": 0, "negative_gate_exit_code": 1,
+                                     "table": {"cells_expected": 20, "candidate_cell_accuracy": .8,
+                                               "baseline_cell_accuracy": .8}})
+            prefix = "test_example ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\n"
+            for summary, expected in (("OK", gate.PASS), ("OK (skipped=1)", gate.FAIL)):
+                with self.subTest(summary=summary):
+                    log.write_text(prefix + summary + "\n", encoding="utf-8")
+                    gate.atomic_json(proof, {"identity": identity, "run_id": manifest["run_id"],
+                                             "finished_at": now.isoformat(), "checks": gate.descriptor(root, checks),
+                                             "unit_log": gate.descriptor(root, log)})
+                    manifest["compatibility"] = gate.descriptor(root, proof)
+                    self.assertEqual(gate.runtime_gates(root, manifest, identity)["G5"], expected)
+
     def test_preflight_rejects_a_report_for_a_different_tree_or_configuration(self):
         now = datetime.now(timezone.utc).isoformat()
         identity = {"commit":"a"*40,"tree":"b"*40,"runtime":{"settings":{"OCR_PIPELINE_MODE":"legacy"}}}

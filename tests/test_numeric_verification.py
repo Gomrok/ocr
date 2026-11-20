@@ -188,6 +188,15 @@ class NumericVerificationTests(unittest.TestCase):
             _verify_text_numbers(words, np.full((60,100),255,np.uint8), [], None)
         self.assertCountEqual([call.kwargs["expected_text"] for call in glyph.call_args_list], inputs)
 
+    def test_bidi_marks_do_not_hide_numeric_candidates_or_change_the_reading(self):
+        original = "\u061c-۰۴٫۶\u200f"
+        words = [{"text": original, "bbox": (10, 10, 90, 40)}]
+        with patch.object(P, "_glyph_digit_ocr", return_value={"text": "-۰۴٫۵", "independent_positions": [4]}) as glyph:
+            _verify_text_numbers(words, np.full((60, 100), 255, np.uint8), [], None)
+        self.assertEqual(glyph.call_args.kwargs["expected_text"], "-۰۴٫۶")
+        self.assertEqual(words[0]["raw_ocr_text"], original)
+        self.assertEqual(words[0]["text"], "\u061c-۰۴٫۵\u200f")
+
     def test_real_isolated_persian_digits(self):
         engine = TesseractEngine("fas")
         if not engine.native_ok():

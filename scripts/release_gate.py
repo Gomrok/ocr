@@ -169,7 +169,7 @@ def runtime_gates(root, manifest, identity):
         gates["G5"] = PASS if (results["unit_exit_code"] == 0 and results["powershell_exit_code"] == 0
                               and results["negative_gate_exit_code"] != 0
                               and bool(re.search(r"^Ran [1-9][0-9]* tests? in ", unit_log, re.M))
-                              and bool(re.search(r"^OK\s*\Z", unit_log))
+                              and bool(re.search(r"^OK\s*\Z", unit_log, re.M))
                               and table["cells_expected"] > 0
                               and table["candidate_cell_accuracy"] >= table["baseline_cell_accuracy"]
                               and table["candidate_cell_accuracy"] > 0) else FAIL

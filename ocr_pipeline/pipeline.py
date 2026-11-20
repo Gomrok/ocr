@@ -817,6 +817,7 @@ def _glyph_digit_ocr(engine_list: list[E.OCREngine], crop: np.ndarray,
 
 
 _NUMBER = re.compile(r"[+\-−]?[0-9۰-۹٠-٩]+(?:[.,،٫٬/:\-‐‑–][0-9۰-۹٠-٩]+)*[%٪]?")
+_NUMERIC_BOUNDARY = "()[]،؛\u061c\u200e\u200f"
 
 
 def _verify_text_numbers(words: list[dict], source: np.ndarray,
@@ -827,8 +828,10 @@ def _verify_text_numbers(words: list[dict], source: np.ndarray,
     for word in words:
         original = word.get("text", "")
         alternatives = [item["text"] for item in word.get("recognition_readings", []) if item.get("text")]
+        # Tesseract may wrap a standalone RTL number in directional marks.
+        # Keep them in the reading and output, but do not count them as glyphs.
         pattern_read = next((text for text in [original, *alternatives]
-                             if _NUMBER.fullmatch(text.strip("()[]،؛"))), None)
+                             if _NUMBER.fullmatch(text.strip(_NUMERIC_BOUNDARY))), None)
         if pattern_read is None or not word.get("bbox") or word.get("numeric_verified"):
             if _NUMBER.search(original):
                 word.setdefault("numeric_status", "observed")
